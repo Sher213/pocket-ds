@@ -351,7 +351,10 @@ class ReportCreator():
         """Generate visuals, a text report, and a PDF."""
         self.create_visuals(X_test, y_test, predictions)
         report_text = self.generate_text_report(X_train, X_test, y_train, y_test, predictions, score)
-        self.save_report_as_pdf(report_text)
+
+        def clean_text(text):
+            return re.sub(r'[^\x00-\x7F]+', ' ', text)
+        self.save_report_as_pdf(clean_text(report_text))
     
 
 predictor = AnalysisPredictor(dataset="20250314_144422_insurance.csv", target_class="region")
