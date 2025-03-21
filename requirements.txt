@@ -14,3 +14,4 @@ plotly==5.18.0
 python-dotenv==1.0.0 
 openai
 python-dotenv
+fpdf2
