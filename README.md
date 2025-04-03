@@ -101,5 +101,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Built with ❤️ for data scientists and analysts
-- Powered by open-source machine learning libraries
+- Powered by OpenAI - (looking to go change to open-source machine learning libraries soon!)
 - Inspired by the need for accessible data science tools 
