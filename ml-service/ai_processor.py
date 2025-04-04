@@ -474,7 +474,7 @@ class DatasetScriptor():
         numeric_rules = {
             'age': (0, 120),
             'height': (0, 300),
-            'weight': (0, 500),
+            'weight': (0, float('inf')),
             'price': (0, float('inf')),
             'score': (0, 100)
         }

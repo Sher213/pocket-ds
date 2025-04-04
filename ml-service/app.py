@@ -1,192 +1,297 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict, Optional, Union
+from fastapi.responses import JSONResponse, FileResponse
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-import xgboost as xgb
-import joblib
 import os
+import json
 from datetime import datetime
+from typing import Dict, List, Optional, Any
+from pydantic import BaseModel
+import uvicorn
+from data_processor import DataProcessor
+from auto_modeler import AutoModeler
 
-app = FastAPI(title="Pocket Data Scientist ML Service")
+app = FastAPI(title="Pocket Data Scientist API")
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Create directories for storing models and datasets
-os.makedirs("models", exist_ok=True)
-os.makedirs("datasets", exist_ok=True)
+# Create necessary directories
+os.makedirs("ml-service/datasets", exist_ok=True)
+os.makedirs("ml-service/models", exist_ok=True)
+os.makedirs("ml-service/reports", exist_ok=True)
+os.makedirs("ml-service/logs", exist_ok=True)
+
+# Store processing results
+processing_results = {}
 
 class DatasetMetadata(BaseModel):
-    name: str
-    description: Optional[str] = None
-    target_column: Optional[str] = None
-    feature_columns: Optional[List[str]] = None
+    """Metadata for uploaded dataset."""
+    filename: str
+    rows: int
+    columns: int
+    column_types: Dict[str, str]
+    missing_values: Dict[str, int]
 
-class TrainingRequest(BaseModel):
-    dataset_id: str
-    model_type: str
+class CleaningConfig(BaseModel):
+    """Configuration for data cleaning."""
+    handle_missing: bool = True
+    remove_outliers: bool = True
+    encode_categorical: bool = True
+    extract_datetime: bool = True
+    standardize_names: bool = True
+    remove_duplicates: bool = True
+
+class ModelingConfig(BaseModel):
+    """Configuration for automated modeling."""
     target_column: str
-    feature_columns: List[str]
     test_size: float = 0.2
-    random_state: Optional[int] = None
-    hyperparameters: Dict[str, Union[str, int, float]] = {}
-
-class PredictionRequest(BaseModel):
-    model_id: str
-    data: List[Dict[str, Union[str, int, float]]]
+    random_state: int = 42
+    tune_hyperparameters: bool = True
 
 @app.post("/dataset/upload")
-async def upload_dataset(
-    file: UploadFile = File(...),
-    name: str = Form(...),  # Extract name as a form field
-    description: str = Form(...)  # Extract description as a form field
-):
+async def upload_dataset(file: UploadFile = File(...)) -> DatasetMetadata:
+    """
+    Upload a dataset file (CSV, Excel, or JSON).
+    
+    Args:
+        file: The dataset file to upload
+        
+    Returns:
+        Dataset metadata
+    """
     try:
-        # Save the file
-        file_path = f"datasets/{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
-        with open(file_path, "wb") as buffer:
+        # Save the uploaded file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = f"ml-service/datasets/{timestamp}_{file.filename}"
+        
+        with open(file_path, "wb") as f:
             content = await file.read()
-            buffer.write(content)
-
-        # Read and validate the dataset
-        df = pd.read_csv(file_path)  # Add support for other formats if needed
-
-        return {
-            "message": "Dataset uploaded successfully",
-            "dataset_id": os.path.basename(file_path),
-            "shape": df.shape,
-            "columns": df.columns.tolist(),
-            "preview": df.head().to_dict(orient="records")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/train")
-async def train_model(request: TrainingRequest):
-    try:
-        # Load dataset
-        dataset_path = f"datasets/{request.dataset_id}"
-        df = pd.read_csv(dataset_path)
-
-        # Prepare data
-        X = df[request.feature_columns]
-        y = df[request.target_column]
-
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
-            test_size=request.test_size,
-            random_state=request.random_state
+            f.write(content)
+        
+        # Process the dataset
+        processor = DataProcessor(file_path)
+        
+        # Generate metadata
+        metadata = DatasetMetadata(
+            filename=file.filename,
+            rows=len(processor.df),
+            columns=len(processor.df.columns),
+            column_types=processor.column_types,
+            missing_values=processor.df.isnull().sum().to_dict()
         )
-
-        # Scale features
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        # Train model
-        model = None
-        if request.model_type == "linear_regression":
-            model = LinearRegression(**request.hyperparameters)
-        elif request.model_type == "logistic_regression":
-            model = LogisticRegression(**request.hyperparameters)
-        elif request.model_type == "random_forest":
-            model = RandomForestRegressor(**request.hyperparameters)
-        elif request.model_type == "xgboost":
-            model = xgb.XGBRegressor(**request.hyperparameters)
-        else:
-            raise ValueError(f"Unsupported model type: {request.model_type}")
-
-        model.fit(X_train_scaled, y_train)
-
-        # Evaluate model
-        train_score = model.score(X_train_scaled, y_train)
-        test_score = model.score(X_test_scaled, y_test)
-
-        # Save model and scaler
-        model_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{request.model_type}"
-        model_path = f"models/{model_id}"
-        os.makedirs(model_path, exist_ok=True)
         
-        joblib.dump(model, f"{model_path}/model.joblib")
-        joblib.dump(scaler, f"{model_path}/scaler.joblib")
-        
-        # Save model metadata
-        metadata = {
-            "feature_columns": request.feature_columns,
-            "target_column": request.target_column,
-            "model_type": request.model_type,
-            "hyperparameters": request.hyperparameters,
-            "metrics": {
-                "train_score": train_score,
-                "test_score": test_score
-            }
+        # Store processor for later use
+        processing_results[file.filename] = {
+            "processor": processor,
+            "file_path": file_path
         }
+        
+        return metadata
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/dataset/clean")
+async def clean_dataset(filename: str, config: CleaningConfig) -> Dict[str, Any]:
+    """
+    Clean the uploaded dataset.
+    
+    Args:
+        filename: Name of the uploaded file
+        config: Cleaning configuration
+        
+    Returns:
+        Cleaning results
+    """
+    try:
+        if filename not in processing_results:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        processor = processing_results[filename]["processor"]
+        
+        # Clean the dataset
+        cleaned_df = processor.clean_dataset(
+            handle_missing=config.handle_missing,
+            remove_outliers=config.remove_outliers,
+            encode_categorical=config.encode_categorical,
+            extract_datetime=config.extract_datetime,
+            standardize_names=config.standardize_names,
+            remove_duplicates=config.remove_duplicates
+        )
+        
+        # Generate visualizations
+        visualization_paths = processor.generate_visualizations()
+        
+        # Generate EDA report
+        report_path = processor.generate_eda_report()
+        
+        # Save cleaned dataset
+        cleaned_path = processor.save_cleaned_dataset()
         
         return {
-            "model_id": model_id,
-            "metrics": metadata["metrics"],
-            "feature_importance": getattr(model, "feature_importances_", None)
+            "message": "Dataset cleaned successfully",
+            "cleaned_dataset_path": cleaned_path,
+            "visualization_paths": visualization_paths,
+            "report_path": report_path,
+            "cleaning_log": processor.cleaning_log
         }
-
+        
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/predict/{model_id}")
-async def predict(model_id: str, request: PredictionRequest):
+@app.post("/dataset/model")
+async def train_model(filename: str, config: ModelingConfig) -> Dict[str, Any]:
+    """
+    Train models on the cleaned dataset.
+    
+    Args:
+        filename: Name of the uploaded file
+        config: Modeling configuration
+        
+    Returns:
+        Modeling results
+    """
     try:
-        # Load model and scaler
-        model_path = f"models/{model_id}"
-        model = joblib.load(f"{model_path}/model.joblib")
-        scaler = joblib.load(f"{model_path}/scaler.joblib")
-
-        # Prepare input data
-        input_df = pd.DataFrame(request.data)
-        input_scaled = scaler.transform(input_df)
-
-        # Make predictions
-        predictions = model.predict(input_scaled)
-
+        if filename not in processing_results:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        processor = processing_results[filename]["processor"]
+        
+        # Prepare data for modeling
+        X_train, y_train, X_test, y_test = processor.prepare_for_modeling(
+            target_column=config.target_column,
+            test_size=config.test_size,
+            random_state=config.random_state
+        )
+        
+        # Initialize auto modeler
+        modeler = AutoModeler(X_train, y_train, X_test, y_test)
+        
+        # Train and evaluate models
+        results = modeler.auto_model(tune_hyperparameters=config.tune_hyperparameters)
+        
         return {
-            "predictions": predictions.tolist(),
-            "model_id": model_id
+            "message": "Models trained successfully",
+            "best_model_name": results["best_model_name"],
+            "best_score": results["best_score"],
+            "model_path": results["model_path"],
+            "report_path": results["report_path"],
+            "visualization_paths": results["visualization_paths"],
+            "training_log": results["training_log"]
         }
-
+        
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/models")
-async def list_models():
+@app.get("/dataset/report/{filename}")
+async def get_report(filename: str) -> FileResponse:
+    """
+    Get the EDA report for a dataset.
+    
+    Args:
+        filename: Name of the uploaded file
+        
+    Returns:
+        EDA report file
+    """
     try:
-        models = []
-        for model_id in os.listdir("models"):
-            model_path = f"models/{model_id}"
-            if os.path.isdir(model_path):
-                # Load model metadata
-                model = joblib.load(f"{model_path}/model.joblib")
-                models.append({
-                    "id": model_id,
-                    "type": type(model).__name__,
-                    "created": datetime.fromtimestamp(
-                        os.path.getctime(f"{model_path}/model.joblib")
-                    ).isoformat()
-                })
-        return {"models": models}
+        if filename not in processing_results:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        report_path = f"ml-service/reports/eda_report.pdf"
+        
+        if not os.path.exists(report_path):
+            raise HTTPException(status_code=404, detail="Report not found")
+        
+        return FileResponse(report_path, filename="eda_report.pdf")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dataset/visualization/{filename}/{viz_type}")
+async def get_visualization(filename: str, viz_type: str) -> FileResponse:
+    """
+    Get a visualization for a dataset.
+    
+    Args:
+        filename: Name of the uploaded file
+        viz_type: Type of visualization
+        
+    Returns:
+        Visualization file
+    """
+    try:
+        if filename not in processing_results:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        viz_path = f"ml-service/reports/visualizations/{viz_type}.html"
+        
+        if not os.path.exists(viz_path):
+            raise HTTPException(status_code=404, detail="Visualization not found")
+        
+        return FileResponse(viz_path, filename=f"{viz_type}.html")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/model/report/{filename}")
+async def get_model_report(filename: str) -> FileResponse:
+    """
+    Get the model report for a dataset.
+    
+    Args:
+        filename: Name of the uploaded file
+        
+    Returns:
+        Model report file
+    """
+    try:
+        if filename not in processing_results:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        report_path = f"ml-service/reports/model_report.pdf"
+        
+        if not os.path.exists(report_path):
+            raise HTTPException(status_code=404, detail="Report not found")
+        
+        return FileResponse(report_path, filename="model_report.pdf")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/model/visualization/{filename}/{viz_type}")
+async def get_model_visualization(filename: str, viz_type: str) -> FileResponse:
+    """
+    Get a model visualization for a dataset.
+    
+    Args:
+        filename: Name of the uploaded file
+        viz_type: Type of visualization
+        
+    Returns:
+        Visualization file
+    """
+    try:
+        if filename not in processing_results:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        viz_path = f"ml-service/reports/visualizations/{viz_type}.html"
+        
+        if not os.path.exists(viz_path):
+            raise HTTPException(status_code=404, detail="Visualization not found")
+        
+        return FileResponse(viz_path, filename=f"{viz_type}.html")
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True) 
