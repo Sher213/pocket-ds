@@ -76,7 +76,9 @@ class AnalysisPredictor(LLM):
                     """
         
         prediction = super().prompt(message)
-        print(prediction)
+        
+        print("Prediction: ", prediction)
+
         match = re.match(r"\d+", prediction)  # Match one or more digits
         if match:
             prediction = int(match.group())  # Convert to integer
@@ -160,8 +162,6 @@ class BestModelIdentifier():
             
             irrelevant_columns = response.split("\n")
 
-            print(irrelevant_columns)
-
             return [col.strip() for col in irrelevant_columns if col.strip() in columns]
         
         df = pd.read_csv(f"datasets/{csv}")
@@ -170,8 +170,6 @@ class BestModelIdentifier():
         sample_data = df.head(5).to_dict()
         irrelevant_columns = ask_chatgpt_to_identify_irrelevant_columns(df.columns.tolist(), sample_data)
         df.drop(columns=irrelevant_columns, errors='ignore', inplace=True)
-        
-        print(df.head())
 
         encoded_df = df.select_dtypes(include=[np.number]).copy()
     
@@ -328,12 +326,12 @@ class ReportCreator():
         Model Type: {type(self.model).__name__}
         Dataset: {pd.read_csv(self.dataset).head()}
         Problem Type: {self.problem_type}
-        {list(score.keys())[0]}: {score[list(score.keys())[0]]}
+        Model Score: {list(score.keys())[0]}: {score[list(score.keys())[0]]}
 
         Include:
         - Overview of the model.
         - Explanation of feature importance (if available).
-        - Analysis of evaluation metrics (accuracy, confusion matrix, ROC curve).
+        - Analysis of evaluation metrics (make them specific to task, i.e regression considers MSE, classification considers accuracy, etc.).
         - Recommendations for model improvement.
 
         Do Not Include:
@@ -399,106 +397,183 @@ class ReportCreator():
             return re.sub(r'[^\x00-\x7F]+', ' ', text)
         self.save_report_as_pdf(clean_text(report_text))
 
-class DatasetScriptor:
+class DatasetScriptor():
     def __init__(self, dataset):
         """Initialize with the dataset file and OpenAI API key."""
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
         self.dataset_path = f"datasets/{dataset}"
         self.df = pd.read_csv(self.dataset_path)
         self.current_script_path = ""
+        self.cleaning_log = []
+        self.backup_path = f"{self.dataset_path}.backup"
 
-    def get_command_from_openai(self, user_message):
-        """Generate a Python command from OpenAI API based on user input."""
+    def create_backup(self):
+        """Create a backup of the original dataset."""
+        self.df.to_csv(self.backup_path, index=False)
+        self.cleaning_log.append(f"Backup created at {self.backup_path}")
+
+    def validate_data_types(self):
+        """Validate and convert data types appropriately."""
+        type_changes = []
+        for column in self.df.columns:
+            try:
+                # Try to convert to numeric first
+                numeric_series = pd.to_numeric(self.df[column], errors='coerce')
+                if not numeric_series.isna().all():  # If conversion was successful for some values
+                    self.df[column] = numeric_series
+                    type_changes.append(f"Converted {column} to numeric")
+                else:
+                    # Try to convert to datetime
+                    try:
+                        datetime_series = pd.to_datetime(self.df[column], errors='coerce')
+                        if not datetime_series.isna().all():
+                            self.df[column] = datetime_series
+                            type_changes.append(f"Converted {column} to datetime")
+                    except:
+                        # Keep as string if neither conversion works
+                        self.df[column] = self.df[column].astype(str)
+            except Exception as e:
+                self.cleaning_log.append(f"Error converting {column}: {str(e)}")
+        return type_changes
+
+    def handle_missing_values(self):
+        """Handle missing values with appropriate strategies."""
+        missing_values = self.df.isnull().sum()
+        if missing_values.sum() > 0:
+            for column in self.df.columns:
+                if self.df[column].isnull().sum() > 0:
+                    try:
+                        if pd.api.types.is_numeric_dtype(self.df[column]):
+                            # For numeric columns, use median (more robust than mean)
+                            fill_value = self.df[column].median()
+                            self.df[column].fillna(fill_value, inplace=True)
+                            self.cleaning_log.append(f"Filled missing values in {column} with median: {fill_value}")
+                        else:
+                            # For categorical columns, use mode
+                            fill_value = self.df[column].mode()[0]
+                            self.df[column].fillna(fill_value, inplace=True)
+                            self.cleaning_log.append(f"Filled missing values in {column} with mode: {fill_value}")
+                    except Exception as e:
+                        self.cleaning_log.append(f"Error handling missing values in {column}: {str(e)}")
+
+    def standardize_text(self):
+        """Standardize text formatting in string columns."""
+        for column in self.df.select_dtypes(include=['object']).columns:
+            try:
+                # Convert to string and clean
+                self.df[column] = self.df[column].astype(str)
+                self.df[column] = self.df[column].str.lower()
+                self.df[column] = self.df[column].str.strip()
+                self.df[column] = self.df[column].str.replace(r'[^\w\s]', '', regex=True)
+                self.cleaning_log.append(f"Standardized text in {column}")
+            except Exception as e:
+                self.cleaning_log.append(f"Error standardizing text in {column}: {str(e)}")
+
+    def validate_numeric_ranges(self):
+        """Validate and fix numeric ranges for common fields."""
+        numeric_rules = {
+            'age': (0, 120),
+            'height': (0, 300),
+            'weight': (0, 500),
+            'price': (0, float('inf')),
+            'score': (0, 100)
+        }
+        
+        for column in self.df.select_dtypes(include=['number']).columns:
+            column_lower = column.lower()
+            for rule_key, (min_val, max_val) in numeric_rules.items():
+                if rule_key in column_lower:
+                    try:
+                        invalid_mask = (self.df[column] < min_val) | (self.df[column] > max_val)
+                        if invalid_mask.any():
+                            # Replace invalid values with median
+                            median_val = self.df[column].median()
+                            self.df.loc[invalid_mask, column] = median_val
+                            self.cleaning_log.append(f"Fixed {invalid_mask.sum()} invalid values in {column} using median: {median_val}")
+                    except Exception as e:
+                        self.cleaning_log.append(f"Error validating numeric range in {column}: {str(e)}")
+
+    def standardize_column_names(self):
+        """Standardize column names."""
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": f"""You are an expert Python data analyst using pandas and numpy.
-                                                    You can perform dataset cleaning, basic analysis, and transformations.
-                                                    Ensure to load the csv from '{self.dataset_path}'. 
-                                                    Here are the first 5 rows: \n\n
-                                                    
-                                                    {pd.read_csv(self.dataset_path).head()} \n\n
-                                                    
-                                                    Here is the dataset columns: {pd.read_csv(self.dataset_path).columns}.\n 
-                                                    IMPORTANT: 1) Avoid any markings or explanations and 2) just give the user the code. 
-                                                    3) Do not include '```python'. 4) Call the dataset 'df'.
-                                                    5) Only use pandas and numpy operations."""},
-                    {"role": "user", "content": user_message}
-                ]
-            )
-            command = response.choices[0].message.content.strip()
-            print(f"Generated command: {command}")
-            return command
+            new_columns = {col: col.lower().replace(' ', '_').replace('-', '_') for col in self.df.columns}
+            self.df.rename(columns=new_columns, inplace=True)
+            self.cleaning_log.append("Standardized column names")
         except Exception as e:
-            print(f"Error generating command: {e}")
-            return None
+            self.cleaning_log.append(f"Error standardizing column names: {str(e)}")
 
-    def save_command_to_script(self, command):
-        """Save the generated command to a Python file in the scripts/ directory."""
-        script_dir = "scripts"
-        os.makedirs(script_dir, exist_ok=True)
-        
-        script_name = "generated_script.py"
-        script_path = os.path.join(script_dir, script_name)
-        
-        script_content = f"""
-        import pandas as pd
-        import numpy as np
-
-        # Execute the generated command
-        {command}
-
-        # Save the modified dataset
-        df.to_csv('{self.dataset_path}', index=False)
-        print('Dataset updated successfully.')
-        """
-
-        with open(script_path, "w", encoding="utf-8") as script_file:
-            script_file.write(script_content)
-        
-        self.current_script_path = script_path
-        print(f"Script saved to: {script_path}")
-
-    def execute_script(self):
-        """Execute the saved script."""
-        if not self.current_script_path:
-            print("No script available. Please generate and save the script first.")
-            return
-
+    def remove_duplicates(self):
+        """Remove duplicate rows while preserving the first occurrence."""
         try:
-            with open(self.current_script_path, 'r') as f:
-                script_content = f.read()
-            exec(script_content)
-            print("Script executed successfully!")
+            initial_rows = len(self.df)
+            self.df.drop_duplicates(inplace=True)
+            removed_rows = initial_rows - len(self.df)
+            if removed_rows > 0:
+                self.cleaning_log.append(f"Removed {removed_rows} duplicate rows")
         except Exception as e:
-            print(f"Error running script: {e}")
+            self.cleaning_log.append(f"Error removing duplicates: {str(e)}")
 
-    def run(self, user_message):
-        """Main method to handle the entire flow: generate, save, and execute."""
-        command = self.get_command_from_openai(user_message)
-        if command:
-            self.save_command_to_script(command)
-            self.execute_script()
+    def clean_dataset(self):
+        """Clean the dataset using a comprehensive strategy."""
+        try:
+            # Create backup before any changes
+            self.create_backup()
+            
+            # Execute cleaning steps in sequence
+            self.cleaning_log.append("Starting dataset cleaning process")
+            
+            # Step 1: Standardize column names
+            self.standardize_column_names()
+            
+            # Step 2: Validate and convert data types
+            type_changes = self.validate_data_types()
+            self.cleaning_log.extend(type_changes)
+            
+            # Step 3: Handle missing values
+            self.handle_missing_values()
+            
+            # Step 4: Standardize text
+            self.standardize_text()
+            
+            # Step 5: Validate numeric ranges
+            self.validate_numeric_ranges()
+            
+            # Step 6: Remove duplicates
+            self.remove_duplicates()
+            
+            # Save the cleaned dataset
+            self.df.to_csv(self.dataset_path, index=False)
+            self.cleaning_log.append("Dataset cleaning completed successfully")
+            
+            # Print cleaning summary
+            print("\nCleaning Summary:")
+            for log in self.cleaning_log:
+                print(f"- {log}")
+                
+        except Exception as e:
+            # Restore from backup if something goes wrong
+            if os.path.exists(self.backup_path):
+                self.df = pd.read_csv(self.backup_path)
+                self.df.to_csv(self.dataset_path, index=False)
+                print(f"Error during cleaning: {str(e)}")
+                print("Dataset restored from backup")
+            else:
+                print(f"Critical error: {str(e)}")
+                print("No backup available for restoration")
 
-
-predictor = AnalysisPredictor(dataset="20250314_144422_insurance.csv", target_class="charges")
+'''predictor = AnalysisPredictor(dataset="20250314_144422_insurance.csv", target_class="charges")
 problem_type = predictor.predict_problem()
 bmi = BestModelIdentifier(problem_type)
 
 X, y = bmi.process_csv("20250314_144422_insurance.csv", "charges")
 bmi.fit_and_evaluate(X, y)
 
-'''reporter = ReportCreator("20250314_144422_insurance.csv", bmi.best_model, problem_type)
+reporter = ReportCreator("20250314_144422_insurance.csv", bmi.best_model, problem_type)
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 pred, score = bmi.predict(X_test, y_test)
-reporter.create_full_report(X_train, X_test, y_train, y_test, pred, score)
+reporter.create_full_report(X_train, X_test, y_train, y_test, pred, score)'''
 
 
-script_gen = DatasetScriptor('20250314_144422_insurance.csv')
-
-# Get user input to modify the dataset
-user_message = "Create a new column where you calculate the charges per children."
-script_gen.run(user_message)'''
+script_gen = DatasetScriptor('my_file.csv')
+script_gen.clean_dataset()
