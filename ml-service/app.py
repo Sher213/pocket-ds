@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 import uvicorn
-from data_processor import DataProcessor
+from dataset_processor_ai import DatasetScriptor
 from auto_modeler import AutoModeler
 
 app = FastAPI(title="Pocket Data Scientist API")
@@ -77,7 +77,7 @@ async def upload_dataset(file: UploadFile = File(...)) -> DatasetMetadata:
             f.write(content)
         
         # Process the dataset
-        processor = DataProcessor(file_path)
+        processor = DatasetScriptor(file_path)
         
         # Generate metadata
         metadata = DatasetMetadata(
@@ -100,7 +100,7 @@ async def upload_dataset(file: UploadFile = File(...)) -> DatasetMetadata:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/dataset/clean")
-async def clean_dataset(filename: str, config: CleaningConfig) -> Dict[str, Any]:
+async def clean_dataset(filename: str, target_class: str) -> Dict[str, Any]:
     """
     Clean the uploaded dataset.
     
@@ -118,29 +118,16 @@ async def clean_dataset(filename: str, config: CleaningConfig) -> Dict[str, Any]
         processor = processing_results[filename]["processor"]
         
         # Clean the dataset
-        cleaned_df = processor.clean_dataset(
-            handle_missing=config.handle_missing,
-            remove_outliers=config.remove_outliers,
-            encode_categorical=config.encode_categorical,
-            extract_datetime=config.extract_datetime,
-            standardize_names=config.standardize_names,
-            remove_duplicates=config.remove_duplicates
-        )
+        dataset_path, dataset = processor.use_dataset_scriptor(target_class=target_class)
         
         # Generate visualizations
         visualization_paths = processor.generate_visualizations()
         
-        # Generate EDA report
-        report_path = processor.generate_eda_report()
-        
-        # Save cleaned dataset
-        cleaned_path = processor.save_cleaned_dataset()
-        
         return {
             "message": "Dataset cleaned successfully",
-            "cleaned_dataset_path": cleaned_path,
+            "cleaned_dataset_path": dataset_path,
             "visualization_paths": visualization_paths,
-            "report_path": report_path,
+            "report_path": "reports/eda_report.pdf",
             "cleaning_log": processor.cleaning_log
         }
         

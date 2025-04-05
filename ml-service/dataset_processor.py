@@ -33,7 +33,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("data_processor")
 
-class DataProcessor:
+class DatasetScriptor:
     """
     A comprehensive class for data ingestion, cleaning, and analysis.
     """
@@ -441,6 +441,18 @@ class DataProcessor:
         self.analysis_results["summary_statistics"] = summary
         return summary
     
+    def clean_text_columns(self) -> None:
+        """
+        Clean text columns by removing non-ASCII characters.
+        """
+        text_columns = self.df.select_dtypes(include=['object', 'category']).columns
+        
+        for column in text_columns:
+            self.df[column] = self.df[column].apply(lambda x: re.sub(r'\s+', ' ', x).strip() if isinstance(x, str) else x)
+        
+        logger.info("Cleaned text columns")
+        self.cleaning_log.append("Cleaned text columns")
+
     def generate_correlation_matrix(self) -> pd.DataFrame:
         """
         Generate correlation matrix for numeric columns.
@@ -736,6 +748,10 @@ class DataProcessor:
             if sum(outlier_counts.values()) > 0:
                 self.remove_outliers()
             
+            # Step 4.5: Clean text columns
+            self.clean_text_columns()
+                
+
             # Step 5: Remove duplicates
             self.remove_duplicates()
             
@@ -746,7 +762,8 @@ class DataProcessor:
             self.extract_datetime_features()
 
             # Step 8: Drop all Old Columns
-            self.df.drop(columns=[self.original_df.columns], axis=1, inplace=True)
+            print(self.df.columns)
+            self.df.drop(columns=[col for col in self.df.columns if col in self.original_df.columns], axis=1, inplace=True)
 
             # Save the cleaned dataset
             cleaned_path = self.save_cleaned_dataset()

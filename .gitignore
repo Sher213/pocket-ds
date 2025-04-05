@@ -39,3 +39,4 @@ dist-ssr
 /venv/
 /venv/lib/
 /venv/lib/python3.10/
+reports/
