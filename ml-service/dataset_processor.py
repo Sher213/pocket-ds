@@ -33,7 +33,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("data_processor")
 
-class DatasetScriptor:
+class DatasetProcessor:
     """
     A comprehensive class for data ingestion, cleaning, and analysis.
     """
@@ -56,7 +56,7 @@ class DatasetScriptor:
         # Create necessary directories
         os.makedirs("logs", exist_ok=True)
         os.makedirs("reports", exist_ok=True)
-        
+
         # Load the dataset
         self._load_dataset()
     
@@ -87,54 +87,59 @@ class DatasetScriptor:
     
     def detect_column_types(self) -> Dict[str, str]:
         """
-        Automatically detect column types (numeric, categorical, datetime).
+        Automatically detect column types (numeric, categorical, datetime, text).
 
         Returns:
             Dictionary mapping column names to their detected types
         """
         column_types = {}
 
-        # Regex for formatted numeric strings like "1,000.50" or "3.14"
+        # Improved regex for numeric detection
         numeric_regex = re.compile(
-            r"""^[\'"]?         # optional opening quote
-                [\$\€\£\¥\₹\₽]?  # optional currency symbol
-                -?              # optional negative sign
-                (\d{1,3}(,\d{3})*|\d+)?  # integer part with optional comma separators
-                ([\.,]\d+)?     # optional decimal part
-                %?              # optional percentage sign
-                [\'"]?$         # optional closing quote
-            """,
+            r"""^[\'"]?           # optional opening quote
+                [\$\€\£\¥\₹\₽]?    # optional currency symbol
+                -?                 # optional negative sign
+                (\d{1,3}(,\d{3})*|\d+)?  # integer part with optional comma separators or just digits
+                (\.\d+)?           # optional decimal part (dot separated)
+                (%|[\'"]?$)?       # optional percentage sign or optional closing quote
+                $""",  # Added end of string anchor
             re.VERBOSE,
         )
 
         for column in self.df.columns:
-            # Try to convert to datetime
+            # Handle datetime conversion
             try:
-                pd.to_datetime(self.df[column])
+                # Try converting the entire column to datetime (excluding errors)
+                pd.to_datetime(self.df[column], errors='raise')
                 column_types[column] = "datetime"
-                continue
-            except:
+            except Exception as e:
+                # Handle specific error if necessary
                 pass
 
-            # Check if numeric dtype or regex-matching string that looks numeric
+            # Check if numeric dtype
             if pd.api.types.is_numeric_dtype(self.df[column]):
                 column_types[column] = "numeric"
-            elif (
-                bool(numeric_regex.match(str(self.df[column].iloc[0])))
-            ):
-                column_types[column] = "numeric"
-                # Optional: convert the column now if you want
-                self.df[column] = self.df[column].replace(r'[^\d\.\-]', '', regex=True)
+                continue
+
+            # Check if it looks like a numeric string (by sampling)
+            try:
+                sample = self.df[column].dropna().sample(min(10, len(self.df)), random_state=42).astype(str)
+                if all(numeric_regex.fullmatch(x) for x in sample):
+                    column_types[column] = "numeric"
+            except Exception as e:
+                # Handle sample error
+                pass
+
+            # Determine if categorical or text based on unique value count
+            unique_count = self.df[column].nunique()
+            if unique_count < min(50, len(self.df) * 0.5):
+                column_types[column] = "categorical"
+                continue
             else:
-                unique_count = self.df[column].nunique()
-                if unique_count < min(50, len(self.df) * 0.5):
-                    column_types[column] = "categorical"
-                else:
-                    column_types[column] = "text"
+                column_types[column] = "text"
 
         self.analysis_results["column_types"] = column_types
-        # logger.info(f"Detected column types: {column_types}")
-
+        print(f"Detected column types: {column_types}")
         return column_types
     
     def handle_missing_values(self, strategy: str = "auto") -> Dict[str, int]:
@@ -264,6 +269,13 @@ class DatasetScriptor:
         
         return removed_rows
     
+    def format_num_vars(self, column_types: dict) -> None:
+        for column, col_type in column_types.items():
+            if col_type == "numeric":
+                # Convert to numeric type
+                self.df[column] = self.df[column].replace(r'[^\d\.\-]', '', regex=True)
+                self.df[column] = pd.to_numeric(self.df[column], errors='coerce')
+
     def encode_categorical_variables(self, categorical_columns: dict, method: str = "auto", threshold: int = 10) -> Dict[str, str]:
         """
         Encode specified categorical variables based on their type.
@@ -750,8 +762,10 @@ class DatasetScriptor:
             
             # Step 4.5: Clean text columns
             self.clean_text_columns()
-                
 
+            # Step 4.6: Format numeric variables
+            self.format_num_vars(column_types)
+                
             # Step 5: Remove duplicates
             self.remove_duplicates()
             
@@ -761,9 +775,9 @@ class DatasetScriptor:
             # Step 7: Extract datetime features
             self.extract_datetime_features()
 
-            # Step 8: Drop all Old Columns
-            print(self.df.columns)
-            self.df.drop(columns=[col for col in self.df.columns if col in self.original_df.columns], axis=1, inplace=True)
+            ##### Step 8: Drop all Old Columns Compare new vs old vals?????
+            #print(self.df.columns)
+            #self.df.drop(columns=[col for col in self.df.columns if col in self.original_df.columns], axis=1, inplace=True)
 
             # Save the cleaned dataset
             cleaned_path = self.save_cleaned_dataset()

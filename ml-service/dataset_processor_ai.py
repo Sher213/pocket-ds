@@ -17,7 +17,7 @@ from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 from statsmodels.tsa.arima.model import ARIMA
 import os
-import subprocess
+from dataset_processor import DatasetProcessor
 
 load_dotenv()
 
@@ -403,12 +403,13 @@ class ReportCreator():
             return re.sub(r'[^\x00-\x7F]+', ' ', text)
         self.save_report_as_pdataset(clean_text(report_text))
 
-class DatasetScriptor(LLM_API):
-    def __init__(self, dataset):
+class DatasetScriptor(LLM_API, DatasetProcessor):
+    def __init__(self, dataset, target_column):
         """Initialize with the dataset file and OpenAI API key."""
+        
+        # LLM_API initialization
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.system_message = "You are a data cleaning and processing expert. Your skills range from data type validation, missing value handling, text standardization, numeric range validation, and duplicate removal, etc. using Python and libraries like pandas, numpy, scikit-learn."
-
         self.messages = []
 
         self.dataset_path = f"datasets/{dataset}"
@@ -417,12 +418,26 @@ class DatasetScriptor(LLM_API):
         self.cleaning_log = []
         self.backup_path = f"{self.dataset_path}.backup"
 
-    def create_backup(self):
+        #DatasetProcessor initialization
+        self.df = None
+        self.original_df = None
+        self.analysis_results = {}
+        self.backup_path = f"{self.dataset_path}.backup"
+        self.target_column = target_column
+        # Create necessary directories
+        os.makedirs("logs", exist_ok=True)
+        os.makedirs("reports", exist_ok=True)
+        # Load the dataset
+        self._load_dataset()
+
+        print(self.df.dtypes)
+
+    def create_backup_DEPRECATED(self):
         """Create a backup of the original dataset."""
         self.dataset.to_csv(self.backup_path, index=False)
         self.cleaning_log.append(f"Backup created at {self.backup_path}")
 
-    def validate_data_types(self):
+    def validate_data_types_DEPRECATED(self):
         """Validate and convert data types appropriately."""
         type_changes = []
         for column in self.dataset.columns:
@@ -446,7 +461,7 @@ class DatasetScriptor(LLM_API):
                 self.cleaning_log.append(f"Error converting {column}: {str(e)}")
         return type_changes
 
-    def handle_missing_values(self):
+    def handle_missing_values_DEPRECATED(self):
         """Handle missing values with appropriate strategies."""
         missing_values = self.dataset.isnull().sum()
         if missing_values.sum() > 0:
@@ -503,7 +518,7 @@ class DatasetScriptor(LLM_API):
                     except Exception as e:
                         self.cleaning_log.append(f"Error validating numeric range in {column}: {str(e)}")
 
-    def standardize_column_names(self):
+    def standardize_column_names_DEPRECATED(self):
         """Standardize column names."""
         try:
             new_columns = {col: col.lower().replace(' ', '_').replace('-', '_') for col in self.dataset.columns}
@@ -512,7 +527,7 @@ class DatasetScriptor(LLM_API):
         except Exception as e:
             self.cleaning_log.append(f"Error standardizing column names: {str(e)}")
 
-    def remove_duplicates(self):
+    def remove_duplicates_DEPRECATED(self):
         """Remove duplicate rows while preserving the first occurrence."""
         try:
             initial_rows = len(self.dataset)
@@ -523,7 +538,7 @@ class DatasetScriptor(LLM_API):
         except Exception as e:
             self.cleaning_log.append(f"Error removing duplicates: {str(e)}")
 
-    def clean_dataset(self):
+    def clean_dataset_DEPRECATED(self):
         """Clean the dataset using a comprehensive strategy."""
         try:
             # Create backup before any changes
@@ -571,7 +586,21 @@ class DatasetScriptor(LLM_API):
                 print(f"Critical error: {str(e)}")
                 print("No backup available for restoration")
 
-    def use_dataset_scriptor(self, target_class=None):
+    def execute_script(self):
+        """Execute the saved script."""
+        if not self.current_script_path:
+            print("No script available. Please generate and save the script first.")
+            return
+
+        try:
+            with open(self.current_script_path, 'r') as f:
+                script_content = f.read()
+            exec(script_content)
+            print("Script executed successfully!")
+        except Exception as e:
+            print(f"Error running script: {e}")
+
+    def use_dataset_scriptor(self):
         # Read and print the content of the file
         file_path = "dataset_processor.py"
 
@@ -607,7 +636,7 @@ class DatasetScriptor(LLM_API):
             Ensure to follow these rules:
             1) Use the code and functions in dataset_processor.py to clean the dataset.
             2) Refer to the dataset as "dataset" in the code.
-            3) The target feature is {target_class}.
+            3) The target feature is {self.target_column}.
             4) DO NOT include any import statements or the class definition.
             5) Use '{self.dataset_path}' as the dataset path.
             6) DO NOT include any other text or explanation. Just provide the code.
@@ -619,10 +648,9 @@ class DatasetScriptor(LLM_API):
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from dataset_processor import DataProcessor
+from dataset_processor import DatasetProcessor
 import pandas as pd
 import numpy as np
-import scikit-learn
 import pandas as pd
 import numpy as np
 import re
@@ -649,8 +677,8 @@ import joblib
 try:
     dataset.to_csv('{self.dataset_path.split('.')[0]}_cleaned.csv', index=False)
     print('Dataset updated successfully.')
-else:
-    print('Datset not saved with manually.')"""
+except Exception as e:
+    print('Dataset not saved manually:', str(e))"""
                       
         # Save the script to a file
         self.current_script_path = "scripts/generated_script_for_dataset_processing.py"
@@ -660,27 +688,12 @@ else:
             file.write(file_script)
 
         print("Saved to: ", self.current_script_path)
-
-        def execute_script(self):
-            """Execute the saved script."""
-            if not self.current_script_path:
-                print("No script available. Please generate and save the script first.")
-                return
-
-            try:
-                with open(self.current_script_path, 'r') as f:
-                    script_content = f.read()
-                exec(script_content)
-                print("Script executed successfully!")
-            except Exception as e:
-                print(f"Error running script: {e}")
         
-        execute_script(self)
+        self.execute_script(self)
     
         return self.dataset_path, self.dataset
-        
 
-'''predictor = AnalysisPredictor(dataset="20250314_144422_insurance.csv", target_class="charges")
+predictor = AnalysisPredictor(dataset="20250314_144422_insurance.csv", target_class="charges")
 problem_type = predictor.predict_problem()
 bmi = BestModelIdentifier(problem_type)
 
@@ -691,8 +704,9 @@ reporter = ReportCreator("20250314_144422_insurance.csv", bmi.best_model, proble
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 pred, score = bmi.predict(X_test, y_test)
-reporter.create_full_report(X_train, X_test, y_train, y_test, pred, score)'''
+reporter.create_full_report(X_train, X_test, y_train, y_test, pred, score)
 
 
-script_gen = DatasetScriptor('my_file.csv', 'Actual gross')
-script_gen.use_dataset_scriptor()
+script_gen = DatasetScriptor('insurance.csv', target_column="charges")
+#script_gen.use_dataset_scriptor(target_class="charges")
+script_gen.clean_dataset()

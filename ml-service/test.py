@@ -13,7 +13,7 @@ import seaborn as sns
 from datetime import datetime
 import json
 import logging
-from data_processor import DataProcessor
+from dataset_processor import DatasetProcessor
 from auto_modeler import AutoModeler
 
 # Configure logging
@@ -31,8 +31,8 @@ def test_data_processing(dataset_path):
     """Test the data processing functionality."""
     logger.info("Testing data processing functionality")
     
-    # Initialize DataProcessor
-    processor = DataProcessor(dataset_path, target_column="Average gross")
+    # Initialize DatasetProcessor
+    processor = DatasetProcessor(dataset_path, target_column=None)
     
     # Display initial dataset info
     logger.info(f"Initial dataset shape: {processor.df.shape}")
@@ -156,10 +156,10 @@ def main():
     logger.info("Starting Pocket Data Scientist test script")
     
     # Create sample dataset
-    dataset_path = 'datasets/my_file.csv'
+    dataset_path = 'datasets/insurance.csv'
     
     # Test data processing
-    processor, X_train, X_test, y_train, y_test = test_data_processing(dataset_path)
+    processor, X_train, X_test, y_train, y_test = test_data_processing('charges')
     
     # Test auto modeling
     modeler, auto_results = test_auto_modeling(X_train, y_train, X_test, y_test)
