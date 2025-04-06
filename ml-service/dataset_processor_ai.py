@@ -22,28 +22,40 @@ from dataset_processor import DatasetProcessor
 load_dotenv()
 
 def ask_gpt_to_identify_irrelevant_columns(columns, sample_data, target_column):
-    prompt = f"""
-    Given the following dataset columns and sample data, identify which columns are irrelevant for predicting the target variable, {target_column}:
+    prompt = f"""Given the following information about a dataset, identify the columns that are likely irrelevant for predicting the specified target variable in a machine learning model.
+
+Dataset Information:
+
+Columns: {columns}
+Sample Data: {sample_data}
+Target Column: {target_column}
+Based on your expert data science knowledge, provide a list containing only the names of the columns you recommend for removal before model training.
+
+Remember the following constraints:
+
+List Only Removals: Your output should only include the names of the columns you want to remove. Do not list columns you intend to keep for training.
+Target Preservation: Do not include the name of the {target_column} in your list of columns to remove.
+Encoded Column Handling: If any original categorical columns are present in the {columns} and the {sample_data} suggests they have been encoded (e.g., one-hot encoded), include the names of the original categorical columns in your removal list, not the encoded columns themselves.
+Provide your list of columns to remove here:"""
             
-    Columns: {columns}
-    Sample Data:
-    {sample_data}
-            
-    Provide a list of column names that should be removed.
-    """
-            
-    llm = LLM_API("""You are an expert data scientist well trained in the ability to identify irrelevant features for model training."
-    Ensure to follow these rules: 1) Only include the names of the columns - no explanation is necessary, 
-    2) Ignore the target feature, 3) Organize the irrelevant feature names neatly with no other decorators or text.
-    4) Do not remove the encoded columns - if you see encoded columns, find the original column name and remove it instead.
-    5) If you see a column name that is a combination of two columns, remove the original columns instead of the combined column.""")
+    llm = LLM_API("""As an expert data scientist skilled in identifying irrelevant features for model training, you will be provided with a list of columns. Your task is to identify and list only the names of the columns that should be removed before training a machine learning model.
+Ensure you adhere to the following strict rules:
+Output Format: Only include the names of the columns you want to remove. Do not include the names of columns you intend to use for training.
+Target Preservation: Do not include the name of the target variable in your list of columns to remove.
+Encoded Column Handling: If any original categorical columns have been encoded into new numerical columns, include the names of the original categorical columns in your list for removal. Do not remove the encoded columns themselves""")
     response = llm.send_prompt(prompt)
-            
-    irrelevant_columns = response.split("\n")
 
-    print("Irrelevant columns identified by GPT: ", irrelevant_columns)
+    print("RESPONSE: ", response)
 
-    return [col.strip() for col in irrelevant_columns if col.strip() in columns]
+    # Convert string to list (and clean whitespace)
+    remove_list = [
+        col.strip('[] \n,')
+        for line in response.split('\n')
+        for col  in line.split(',')
+        if col.strip('[] \n,')
+    ]
+
+    return [col.strip("[] ") for col in remove_list if col.strip() in columns]
 
 class LLM_API:
     def __init__(self, system_message):
@@ -129,7 +141,7 @@ class AnalysisPredictor(LLM_API):
         return self.problem
 
 class BestModelIdentifier():
-    def __init__(self, problem_type='regression'):
+    def __init__(self, problem_type: str ='regression', target_column: str = None) -> dict:
         """
         Initialize with the problem type.
         :param problem_type: "regression", "classification", "sentiment", or "time-series"
@@ -138,6 +150,8 @@ class BestModelIdentifier():
         self.models = self._get_models()
         self.best_model = None
         self.best_score = None
+
+        self.target_column = target_column
 
     def _get_models(self):
         """Return a dictionary of models based on the problem type."""
@@ -178,7 +192,7 @@ class BestModelIdentifier():
         
         # Ask ChatGPT to check which columns are irrelevant
         sample_data = dataset.head(5).to_dict()
-        irrelevant_columns = self.ask_gpt_to_identify_irrelevant_columns(dataset.columns.tolist(), sample_data)
+        irrelevant_columns = self.ask_gpt_to_identify_irrelevant_columns(dataset.columns.tolist(), sample_data, self.target_column)
         dataset.drop(columns=irrelevant_columns, errors='ignore', inplace=True)
 
         encoded_dataset = dataset.select_dtypes(include=[np.number]).copy()
@@ -403,57 +417,147 @@ Organize your report clearly with the following sections:
 5.  **Potential Trends and Insights**
 6.  **Further Analysis and Next Steps**
 7.  **Conclusion:** Summarize the key findings and recommendations.
+
+DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVETICA FONT.
 """
 
         # Call OpenAI API
         completion = self.client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
         )
         report_text = completion.choices[0].message.content
 
         # Save text to file
-        with open(output_path, "w") as file:
+        with open(output_path, "w", encoding='utf-8') as file:
             file.write(report_text)
 
         print(f"✅ GPT Text report saved as '{output_path}'")
         return report_text
 
     def save_report_as_pdf(self, text_file_path, output_path="reports/model_report.pdf"):
+        """Generate and save the full report as a PDF, supporting both EDA and model reports."""
+
         # Read file content
-        with open(text_file_path, "r") as file:
+        with open(text_file_path, "r", encoding='utf-8') as file:
             report_text = file.read()
 
-        """Generate and save the full report as a pdf."""
+        # Decide title and visual section based on file type
+        if "eda" in output_path.lower():
+            title = "Exploratory Data Analysis Report"
+            visual_title = "Data Visualizations"
+            visuals = [
+                f"{self.reports_dir}/eda_histograms.png",
+                f"{self.reports_dir}/correlation_matrix.png"
+            ]
+        elif "model" in output_path.lower():
+            title = "Model Evaluation Report"
+            visual_title = "Model Performance Visuals"
+            visuals = [
+                f"{self.reports_dir}/roc_curve.png",
+                f"{self.reports_dir}/confusion_matrix.png"
+            ]
+        else:
+            title = "Analysis Report"
+            visual_title = "Visual Analysis"
+            visuals = []
+
+        # Create PDF
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
-        pdf.set_font("Arial", "B", 16)
-        pdf.cell(200, 10, "Model Evaluation Report", ln=True, align="C")
+        pdf.add_font("DejaVu", "", "fonts/DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", "", 14)
+        pdf.cell(200, 10, title, ln=True, align="C")
 
-        # Add model overview
-        pdf.set_font("Arial", size=12)
+        # Report content
+        pdf.set_font("DejaVu", "", 14)
         pdf.multi_cell(0, 10, report_text)
 
-        # Add visuals if available
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(200, 10, "Visual Analysis", ln=True, align="C")
+        # Add visuals section
+        if visuals:
+            pdf.add_page()
+            pdf.set_font("DejaVu", "", 14)
+            pdf.cell(200, 10, visual_title, ln=True, align="C")
 
-        roc_path = f"{self.reports_dir}/roc_curve.png"
-        cm_path = f"reports/confusion_matrix.png"
+            for img_path in visuals:
+                if os.path.exists(img_path):
+                    pdf.ln(10)
+                    pdf.image(img_path, x=30, w=150)
 
-        if os.path.exists(roc_path):
-            pdf.image(roc_path, x=30, y=50, w=150)
-            pdf.ln(85)  # Space after ROC curve
-
-        if os.path.exists(cm_path):
-            pdf.image(cm_path, x=30, y=140, w=150)
-
-        # Save final pdf
-        pdf_path = f"{self.reports_dir}/model_report.pdf"
+        # Save final PDF
         pdf.output(output_path)
-        print(f"✅ GPT Full EDA PDF report saved as '{output_path}'")
+        print(f"✅ PDF report saved as '{output_path}'")
+
+    def generate_model_report_with_gpt(self, model_report_path="reports/model_metrics.txt", output_path="reports/gpt_model_report.txt"):
+        """Generate a detailed model evaluation analysis report using OpenAI API."""
+
+        # Read the model evaluation report (metrics)
+        with open(model_report_path, "r") as file:
+            model_metrics = file.read()
+
+        # Generate GPT prompt
+        prompt = f"""
+    You are a senior machine learning engineer and data scientist. Given the model evaluation report below, generate a professional and structured analysis report.
+
+    **Model Evaluation Metrics:**
+    {model_metrics}
+
+    **Dataset Sample:**
+    {self.df.sample(n=10).to_string()}
+
+    **Report Requirements:**
+
+    1. **Model Overview:**
+    - Infer the type of model used based on the metrics and dataset (classification, regression, etc.).
+    - Comment on any known assumptions or use-cases of the inferred model type.
+
+    2. **Metric Interpretation:**
+    - Explain what each metric means (e.g., Accuracy, Precision, Recall, F1-score, AUC-ROC for classification; MAE, RMSE, R² for regression).
+    - Analyze the values: Are they considered good? Are there signs of overfitting/underfitting?
+
+    3. **Performance Evaluation:**
+    - Comment on model strengths and weaknesses based on the reported metrics.
+    - Mention if class imbalance could be a concern (based on classification metrics).
+    - If a confusion matrix is available, discuss patterns (e.g., false positives/negatives).
+
+    4. **Visual Insight (if applicable):**
+    - Suggest interpretation for visual elements (ROC curve, confusion matrix, residual plots, etc.).
+
+    5. **Model Improvement Suggestions:**
+    - Provide recommendations for improving the model (e.g., hyperparameter tuning, feature engineering, different algorithms).
+    - Discuss if more data or better quality data might help.
+
+    6. **Next Steps:**
+    - Suggest next actions (e.g., validation on unseen test data, model deployment, A/B testing, etc.).
+
+    7. **Conclusion:**
+    - Summarize findings and recommend whether the model is ready for production.
+
+    Organize the final report in sections with headers like:
+    - **Introduction**
+    - **Metric Interpretation**
+    - **Performance Analysis**
+    - **Insights from Visuals**
+    - **Recommendations for Improvement**
+    - **Conclusion**
+
+    DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVETICA FONT.
+    """
+
+        # Call OpenAI API
+        completion = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        report_text = completion.choices[0].message.content
+
+        # Save to file
+        with open(output_path, "w", encoding= 'utf-8') as file:
+            file.write(report_text)
+
+        print(f"✅ GPT Model report saved as '{output_path}'")
+        return report_text
 
     def create_full_report(self, X_train, X_test, y_train, y_test, predictions, score):
         """Generate visuals, a text report, and a pdf."""

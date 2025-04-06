@@ -93,6 +93,9 @@ class DatasetProcessor:
         Returns:
             Dictionary mapping column names to their detected types
         """
+
+        print("ORIGINAL DTYPES:", self.df.dtypes)
+
         column_types = {}
 
         # Improved regex for numeric detection
@@ -127,8 +130,9 @@ class DatasetProcessor:
                 sample = self.df[column].dropna().sample(min(10, len(self.df)), random_state=42).astype(str)
                 if all(numeric_regex.fullmatch(x) for x in sample):
                     column_types[column] = "numeric"
+                    continue
             except Exception as e:
-                # Handle sample error
+                
                 pass
 
             # Determine if categorical or text based on unique value count
@@ -273,14 +277,13 @@ class DatasetProcessor:
         return removed_rows
     
     def format_num_vars(self, column_types: dict) -> None:
-        print(self.df.dtypes)
         for column, col_type in column_types.items():
             if col_type == "numeric":
                 # Convert to numeric type
                 self.df[column] = self.df[column].replace(r'[^\d\.\-]', '', regex=True)
                 self.df[column] = pd.to_numeric(self.df[column], errors='coerce')
 
-    def encode_categorical_variables(self, categorical_columns: dict, method: str = "auto", threshold: int = 10) -> Dict[str, str]:
+    def encode_categorical_variables(self, categorical_columns: dict, method: str = "auto", threshold: int = 10, target_column: str = None) -> Dict[str, str]:
         """
         Encode specified categorical variables based on their type.
 
@@ -288,6 +291,7 @@ class DatasetProcessor:
             categorical_columns: Dictionary where keys are column names and values are their types.
             method: Encoding method ("label", "onehot", or "auto")
             threshold: Threshold for one-hot encoding (number of unique values)
+            target_column: Column to be treated as the prediction target
 
         Returns:
             Dictionary mapping original column names to their encoded versions
@@ -304,6 +308,17 @@ class DatasetProcessor:
 
             unique_count = self.df[column].nunique()
 
+            # Handle target_column separately with label encoding
+            if column == target_column:
+                le = LabelEncoder()
+                self.df[f"{column}_encoded"] = le.fit_transform(self.df[column].astype(str))
+                encoded_columns[column] = f"{column}_encoded"
+                logger.info(f"Applied label encoding to target column {column}")
+                self.cleaning_log.append(f"Applied label encoding to target column {column}")
+                target_column = f'{target_column}_encoded'
+                continue
+
+            # Non-target columns: decide encoding method
             if method == "label" or (method == "auto" and unique_count > threshold):
                 # Label encoding
                 le = LabelEncoder()
@@ -321,7 +336,7 @@ class DatasetProcessor:
                 self.cleaning_log.append(f"Applied one-hot encoding to {column}")
 
         self.analysis_results["encoded_columns"] = encoded_columns
-        return encoded_columns
+        return encoded_columns, target_column
     
     def extract_datetime_features(self, column_types: dir, columns: Optional[List[str]] = None) -> Dict[str, List[str]]:
         """
@@ -367,7 +382,7 @@ class DatasetProcessor:
         self.analysis_results["datetime_features"] = extracted_features
         return extracted_features
     
-    def standardize_column_names(self) -> Dict[str, str]:
+    def standardize_column_names(self, target_column) -> Dict[str, str]:
         """
         Standardize column names (lowercase, replace spaces with underscores).
         
@@ -376,6 +391,8 @@ class DatasetProcessor:
         """
         original_columns = self.df.columns.tolist()
         new_columns = {col: col.lower().replace(' ', '_').replace('-', '_') for col in original_columns}
+
+        target_column = target_column.lower().replace(' ', '_').replace('-', '_')
         
         # Rename columns
         self.df.rename(columns=new_columns, inplace=True)
@@ -385,7 +402,7 @@ class DatasetProcessor:
         
         self.target_column = self.target_column.lower().replace(' ', '_').replace('-', '_')
 
-        return new_columns
+        return new_columns, target_column
     
     def remove_duplicates(self) -> int:
         """
@@ -475,19 +492,23 @@ class DatasetProcessor:
         
         return correlation_matrix
     
+    def sanitize_filename(self, name):
+        """Remove or replace characters not allowed in filenames."""
+        return re.sub(r'[\\/*?:"<>|()\s]', "_", name)
+
     def generate_visualizations(self, output_dir: str = "reports/visualizations") -> Dict[str, str]:
         """
         Generate visualizations for the dataset.
-        
+
         Args:
             output_dir: Directory to save visualizations
-            
+
         Returns:
             Dictionary mapping visualization types to file paths
         """
         os.makedirs(output_dir, exist_ok=True)
         visualization_paths = {}
-        
+
         # Numeric distributions
         numeric_columns = self.df.select_dtypes(include=[np.number]).columns
         if len(numeric_columns) > 0:
@@ -496,42 +517,44 @@ class DatasetProcessor:
             for i, column in enumerate(numeric_columns, 1):
                 fig.add_trace(go.Histogram(x=self.df[column], name=column), row=i, col=1)
             fig.update_layout(height=300*len(numeric_columns), width=800, title_text="Numeric Distributions")
-            hist_path = f"{output_dir}/numeric_distributions.html"
+            hist_path = os.path.join(output_dir, "numeric_distributions.html")
             fig.write_html(hist_path)
             visualization_paths["numeric_distributions"] = hist_path
-            
+
             # Correlation heatmap
             if len(numeric_columns) > 1:
                 correlation_matrix = self.df[numeric_columns].corr()
                 fig = go.Figure(data=go.Heatmap(z=correlation_matrix, x=correlation_matrix.columns, y=correlation_matrix.columns))
                 fig.update_layout(title="Correlation Heatmap")
-                heatmap_path = f"{output_dir}/correlation_heatmap.html"
+                heatmap_path = os.path.join(output_dir, "correlation_heatmap.html")
                 fig.write_html(heatmap_path)
                 visualization_paths["correlation_heatmap"] = heatmap_path
-        
+
         # Categorical distributions
         categorical_columns = self.df.select_dtypes(include=['object', 'category']).columns
         if len(categorical_columns) > 0:
-            # Bar charts
             for column in categorical_columns:
                 value_counts = self.df[column].value_counts().head(10)
                 fig = go.Figure(data=go.Bar(x=value_counts.index, y=value_counts.values))
                 fig.update_layout(title=f"Top 10 Values in {column}", xaxis_title=column, yaxis_title="Count")
-                bar_path = f"{output_dir}/{column}_bar_chart.html"
+                safe_col = self.sanitize_filename(column)
+                bar_path = os.path.join(output_dir, f"{safe_col}_bar_chart.html")
                 fig.write_html(bar_path)
-                visualization_paths[f"{column}_bar_chart"] = bar_path
-        
+                visualization_paths[f"{safe_col}_bar_chart"] = bar_path
+
         # Scatter plots for numeric columns
         if len(numeric_columns) >= 2:
             for i in range(len(numeric_columns)):
-                for j in range(i+1, len(numeric_columns)):
+                for j in range(i + 1, len(numeric_columns)):
                     col1, col2 = numeric_columns[i], numeric_columns[j]
                     fig = go.Figure(data=go.Scatter(x=self.df[col1], y=self.df[col2], mode='markers'))
                     fig.update_layout(title=f"{col1} vs {col2}", xaxis_title=col1, yaxis_title=col2)
-                    scatter_path = f"{output_dir}/{col1}_{col2}_scatter.html"
+                    safe_col1 = self.sanitize_filename(col1)
+                    safe_col2 = self.sanitize_filename(col2)
+                    scatter_path = os.path.join(output_dir, f"{safe_col1}_{safe_col2}_scatter.html")
                     fig.write_html(scatter_path)
-                    visualization_paths[f"{col1}_{col2}_scatter"] = scatter_path
-        
+                    visualization_paths[f"{safe_col1}_{safe_col2}_scatter"] = scatter_path
+
         self.analysis_results["visualizations"] = visualization_paths
         return visualization_paths
     
@@ -567,28 +590,29 @@ class DatasetProcessor:
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
 
-        pdf.set_font("Arial", "B", 16)
+        pdf.add_font("DejaVu", "", "fonts/DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", "", 14)
         pdf.cell(0, 10, "Exploratory Data Analysis Report", ln=True, align="C")
         pdf.ln(10)
 
-        pdf.set_font("Arial", "B", 14)
+        pdf.set_font("DejaVu", "", 14)
         pdf.cell(0, 10, "Dataset Overview", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("DejaVu", "", 14)
         pdf.cell(0, 10, f"Dataset: {os.path.basename(self.dataset_path)}", ln=True)
         pdf.cell(0, 10, f"Rows: {self.df.shape[0]}, Columns: {self.df.shape[1]}", ln=True)
         pdf.ln(5)
 
-        pdf.set_font("Arial", "B", 14)
+        pdf.set_font("DejaVu", "", 14)
         pdf.cell(0, 10, "Column Types", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("DejaVu", "", 14)
         column_types = self.detect_column_types()
         for column, col_type in column_types.items():
             pdf.cell(0, 10, clean_text(f"{column}: {col_type}"), ln=True)
         pdf.ln(5)
 
-        pdf.set_font("Arial", "B", 14)
+        pdf.set_font("DejaVu", "", 14)
         pdf.cell(0, 10, "Missing Values", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("DejaVu", "", 14)
         missing_values = self.df.isnull().sum()
         for column, count in missing_values.items():
             if count > 0:
@@ -596,9 +620,9 @@ class DatasetProcessor:
         pdf.ln(5)
 
         if self.analysis_results["summary_statistics"]["numeric_summary"]:
-            pdf.set_font("Arial", "B", 14)
+            pdf.set_font("DejaVu", "", 14)
             pdf.cell(0, 10, "Numeric Summary", ln=True)
-            pdf.set_font("Arial", "", 12)
+            pdf.set_font("DejaVu", "", 14)
             for column, stats in self.analysis_results["summary_statistics"]["numeric_summary"].items():
                 pdf.cell(0, 10, clean_text(f"{column}:"), ln=True)
                 pdf.cell(0, 10, clean_text(f"  Mean: {stats['mean']:.2f}, Median: {stats['median']:.2f}, Std: {stats['std']:.2f}"), ln=True)
@@ -606,9 +630,9 @@ class DatasetProcessor:
             pdf.ln(5)
 
         if self.analysis_results["summary_statistics"]["categorical_summary"]:
-            pdf.set_font("Arial", "B", 14)
+            pdf.set_font("DejaVu", "", 14)
             pdf.cell(0, 10, "Categorical Summary", ln=True)
-            pdf.set_font("Arial", "", 12)
+            pdf.set_font("DejaVu", "", 14)
             for column, stats in self.analysis_results["summary_statistics"]["categorical_summary"].items():
                 pdf.cell(0, 10, clean_text(f"{column}: {stats['unique_values']} unique values"), ln=True)
                 pdf.cell(0, 10, "  Top values:", ln=True)
@@ -616,9 +640,9 @@ class DatasetProcessor:
                     pdf.cell(0, 10, clean_text(f"    {value}: {count}"), ln=True)
             pdf.ln(5)
 
-        pdf.set_font("Arial", "B", 14)
+        pdf.set_font("DejaVu", "", 14)
         pdf.cell(0, 10, "Data Cleaning Steps", ln=True)
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("DejaVu", "", 14)
         for step in self.cleaning_log:
             pdf.cell(0, 10, clean_text(f"- {step}"), ln=True)
         pdf.ln(5)
@@ -806,6 +830,8 @@ class DatasetProcessor:
             Dictionary with cleaning results
         """
         try:
+            target_column = self.target_column
+
             # Create backup before any changes
             if self.original_df is None:
                 self.original_df = self.df.copy()
@@ -818,32 +844,32 @@ class DatasetProcessor:
             self.cleaning_log.append("Starting dataset cleaning process")
             
             # Step 1: Standardize column names
-            self.standardize_column_names()
+            _, target_column = self.standardize_column_names(target_column)
 
             # Step 2: Detect column types
             column_types = self.detect_column_types()
+
+            # Step 3: Format numeric variables
+            self.format_num_vars(column_types)
             
-            # Step 3: Handle missing values
+            # Step 4: Handle missing values
             missing_counts = self.handle_missing_values()
             
-            # Step 4: Detect and remove outliers
+            # Step 5: Detect and remove outliers
             outlier_counts = self.detect_outliers()
             if sum(outlier_counts.values()) > 0:
                 self.remove_outliers()
             
-            # Step 4.5: Clean text columns
+            # Step 6: Clean text columns
             self.clean_text_columns()
-
-            # Step 4.6: Format numeric variables
-            self.format_num_vars(column_types)
                 
-            # Step 5: Remove duplicates
+            # Step 6: Remove duplicates
             self.remove_duplicates()
             
-            # Step 6: Encode categorical variables
-            self.encode_categorical_variables(column_types)
+            # Step 7: Encode categorical variables
+            _, target_column = self.encode_categorical_variables(column_types, target_column=target_column)
             
-            # Step 7: Extract datetime features
+            # Step 8: Extract datetime features
             self.extract_datetime_features(column_types)
 
             # Save the cleaned dataset
@@ -873,7 +899,7 @@ class DatasetProcessor:
                 "column_types": column_types,
                 "missing_values": missing_counts,
                 "outliers": outlier_counts
-            }
+            }, target_column
             
         except Exception as e:
             # Restore from backup if something goes wrong

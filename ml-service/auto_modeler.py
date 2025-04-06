@@ -241,6 +241,8 @@ class AutoModeler:
         
         return metrics
     
+    from typing import Any, Tuple
+
     def select_best_model(self, metric: str = None) -> Tuple[Any, str, float]:
         """
         Select the best model based on a specific metric.
@@ -254,38 +256,47 @@ class AutoModeler:
         if not self.model_results:
             raise ValueError("No models have been trained yet")
         
-        # Determine the best metric based on problem type
+        # Choose default metric
         if metric is None:
-            if self.problem_type == "classification":
-                metric = "accuracy"
-            else:  # regression
-                metric = "r2"
+            metric = "accuracy" if self.problem_type == "classification" else "r2"
+        metric = metric.lower()
         
-        # Find the best model
-        best_score = -float('inf') if self.problem_type == "classification" else float('inf')
+        # Define which metrics should be minimized vs. maximized
+        minimize_metrics = {"rmse", "mae", "mse", "log_loss"}
+        is_minimize = metric in minimize_metrics
+        
+        # Initialize best score
+        if is_minimize:
+            best_score = float("inf")
+        else:
+            best_score = -float("inf")
         best_model_name = None
         
+        # Search through trained models
         for name, result in self.model_results.items():
-            if metric in result["metrics"]:
-                score = result["metrics"][metric]
-                
-                # For classification, higher is better; for regression, lower is better
-                if (self.problem_type == "classification" and score > best_score) or \
-                   (self.problem_type == "regression" and score < best_score):
-                    best_score = score
-                    best_model_name = name
+            metrics = result.get("metrics", {})
+            if metric not in metrics:
+                continue
+            score = metrics[metric]
+            
+            # Compare appropriately
+            if (is_minimize and score < best_score) or (not is_minimize and score > best_score):
+                best_score = score
+                best_model_name = name
         
         if best_model_name is None:
-            raise ValueError(f"Could not find a model with the specified metric: {metric}")
+            raise ValueError(f"Could not find any model with the metric '{metric}'")
         
+        # Store and return
         self.best_model = self.model_results[best_model_name]["model"]
         self.best_model_name = best_model_name
         self.best_score = best_score
         
-        logger.info(f"Selected {best_model_name} as the best model with {metric} = {best_score}")
-        self.training_log.append(f"Selected {best_model_name} as the best model with {metric} = {best_score}")
+        logger.info(f"Selected '{best_model_name}' as best with {metric} = {best_score}")
+        self.training_log.append(f"Selected {best_model_name} as best with {metric} = {best_score}")
         
         return self.best_model, self.best_model_name, self.best_score
+
     
     def tune_hyperparameters(self, n_iter: int = 10, cv: int = 3) -> Dict[str, Any]:
         """
@@ -455,9 +466,9 @@ class AutoModeler:
         else:  # regression
             return "neg_mean_squared_error"
     
-    def generate_model_report(self, output_dir: str = "reports") -> str:
+    def generate_model_report_txt(self, output_dir: str = "reports") -> str:
         """
-        Generate a comprehensive model report with a timestamped filename.
+        Generate a comprehensive model report in text format with a timestamped filename.
         
         Args:
             output_dir: Directory to save the report
@@ -467,102 +478,129 @@ class AutoModeler:
         """
         if self.best_model is None:
             raise ValueError("No best model has been selected yet")
-        
+
+        from datetime import datetime
+        import os
+
         # Create unique filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"model_report_{timestamp}.pdf"
+        filename = f"model_report_{timestamp}.txt"
         output_path = os.path.join(output_dir, filename)
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        lines = []
+
+        # Header
+        lines.append("=== Model Evaluation Report ===\n")
+
+        # Problem Type
+        lines.append(">> Problem Type")
+        lines.append(f"Type: {self.problem_type.capitalize()}\n")
+
+        # Best Model
+        lines.append(">> Best Model")
+        lines.append(f"Model: {self.best_model_name}")
+        lines.append(f"Score: {self.best_score:.4f}\n")
+
+        # Model Comparison Table
+        lines.append(">> Model Comparison")
+        if self.problem_type == "classification":
+            header = "Model\tAccuracy\tPrecision\tRecall\tF1 Score"
+        else:
+            header = "Model\tMSE\tRMSE\tMAE\tR²"
+        lines.append(header)
+
+        for name, result in self.model_results.items():
+            if self.problem_type == "classification":
+                row = (
+                    f"{name}\t"
+                    f"{result['metrics'].get('accuracy', 0):.4f}\t"
+                    f"{result['metrics'].get('precision', 0):.4f}\t"
+                    f"{result['metrics'].get('recall', 0):.4f}\t"
+                    f"{result['metrics'].get('f1', 0):.4f}"
+                )
+            else:
+                row = (
+                    f"{name}\t"
+                    f"{result['metrics'].get('mse', 0):.4f}\t"
+                    f"{result['metrics'].get('rmse', 0):.4f}\t"
+                    f"{result['metrics'].get('mae', 0):.4f}\t"
+                    f"{result['metrics'].get('r2', 0):.4f}"
+                )
+            lines.append(row)
+        lines.append("")
+
+        # Feature Importance
+        if hasattr(self.best_model, "feature_importances_"):
+            lines.append(">> Feature Importance")
+            importances = self.best_model.feature_importances_
+            feature_names = self.X_train.columns.tolist()
+            indices = np.argsort(importances)[::-1]
+
+            lines.append("Feature\tImportance")
+            for i in range(min(10, len(indices))):
+                idx = indices[i]
+                lines.append(f"{feature_names[idx]}\t{importances[idx]:.4f}")
+            lines.append("")
+
+        # Training Log
+        lines.append(">> Training Log")
+        for step in self.training_log:
+            lines.append(f"- {step}")
+
+        # Save to file
+        with open(output_path, "w", encoding='utf-8') as f:
+            f.write("\n".join(lines))
+
+        logger.info(f"Model TXT report generated: {output_path}")
+        return output_path
+
+    def generate_model_pdf_report(self, txt_file_path: str, output_dir: str = "reports") -> str:
+        """
+        Generate a PDF report from a TXT file with the same filename (but .pdf extension).
+        
+        Args:
+            txt_file_path: Path to the input TXT report file.
+            output_dir: Directory to save the generated PDF report.
+            
+        Returns:
+            Path to the generated PDF report.
+        """
+        if not os.path.exists(txt_file_path):
+            raise FileNotFoundError(f"The specified TXT file does not exist: {txt_file_path}")
+        
+        # Extract filename without extension and create output path for the PDF
+        filename = os.path.basename(txt_file_path)
+        filename_without_ext = os.path.splitext(filename)[0]
+        output_path = os.path.join(output_dir, f"{filename_without_ext}.pdf")
 
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
+
+        # Read the content of the TXT file
+        with open(txt_file_path, "r", encoding='utf-8') as file:
+            report_text = file.read()
 
         # Create PDF report
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
-        
-        # Use built-in fonts
-        pdf.set_font("Arial", "B", 16)
+
+        # Add a title
+        pdf.add_font("DejaVu", "", "fonts/DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", "", 14)
         pdf.cell(0, 10, "Model Evaluation Report", ln=True, align="C")
         pdf.ln(10)
 
-        # Problem Type
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Problem Type", ln=True)
-        pdf.set_font("Arial", "", 12)
-        pdf.cell(0, 10, f"Type: {self.problem_type.capitalize()}", ln=True)
-        pdf.ln(5)
+        # Add the content from the TXT file
+        pdf.set_font("DejaVu", "", 14)
+        pdf.multi_cell(0, 10, report_text)
 
-        # Best Model
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Best Model", ln=True)
-        pdf.set_font("Arial", "", 12)
-        pdf.cell(0, 10, f"Model: {self.best_model_name}", ln=True)
-        pdf.cell(0, 10, f"Score: {self.best_score:.4f}", ln=True)
-        pdf.ln(5)
-
-        # Model Comparison Table
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Model Comparison", ln=True)
-        pdf.set_font("Arial", "", 12)
-
-        if self.problem_type == "classification":
-            pdf.cell(50, 10, "Model", 1, 0, "C")
-            pdf.cell(35, 10, "Accuracy", 1, 0, "C")
-            pdf.cell(35, 10, "Precision", 1, 0, "C")
-            pdf.cell(35, 10, "Recall", 1, 0, "C")
-            pdf.cell(35, 10, "F1 Score", 1, 1, "C")
-        else:
-            pdf.cell(50, 10, "Model", 1, 0, "C")
-            pdf.cell(35, 10, "MSE", 1, 0, "C")
-            pdf.cell(35, 10, "RMSE", 1, 0, "C")
-            pdf.cell(35, 10, "MAE", 1, 0, "C")
-            pdf.cell(35, 10, "R²", 1, 1, "C")
-
-        for name, result in self.model_results.items():
-            pdf.cell(50, 10, name, 1, 0, "C")
-            if self.problem_type == "classification":
-                pdf.cell(35, 10, f"{result['metrics'].get('accuracy', 0):.4f}", 1, 0, "C")
-                pdf.cell(35, 10, f"{result['metrics'].get('precision', 0):.4f}", 1, 0, "C")
-                pdf.cell(35, 10, f"{result['metrics'].get('recall', 0):.4f}", 1, 0, "C")
-                pdf.cell(35, 10, f"{result['metrics'].get('f1', 0):.4f}", 1, 1, "C")
-            else:
-                pdf.cell(35, 10, f"{result['metrics'].get('mse', 0):.4f}", 1, 0, "C")
-                pdf.cell(35, 10, f"{result['metrics'].get('rmse', 0):.4f}", 1, 0, "C")
-                pdf.cell(35, 10, f"{result['metrics'].get('mae', 0):.4f}", 1, 0, "C")
-                pdf.cell(35, 10, f"{result['metrics'].get('r2', 0):.4f}", 1, 1, "C")
-        
-        pdf.ln(5)
-
-        # Feature Importance
-        if hasattr(self.best_model, "feature_importances_"):
-            pdf.set_font("Arial", "B", 14)
-            pdf.cell(0, 10, "Feature Importance", ln=True)
-            pdf.set_font("Arial", "", 12)
-
-            importances = self.best_model.feature_importances_
-            feature_names = self.X_train.columns.tolist()
-            indices = np.argsort(importances)[::-1]
-
-            pdf.cell(100, 10, "Feature", 1, 0, "C")
-            pdf.cell(90, 10, "Importance", 1, 1, "C")
-
-            for i in range(min(10, len(indices))):
-                idx = indices[i]
-                pdf.cell(100, 10, feature_names[idx], 1, 0, "C")
-                pdf.cell(90, 10, f"{importances[idx]:.4f}", 1, 1, "C")
-        
-        # Training Log
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Training Log", ln=True)
-        pdf.set_font("Arial", "", 12)
-        for step in self.training_log:
-            pdf.cell(0, 10, f"- {step}", ln=True)
-
+        # Save the generated PDF
         pdf.output(output_path)
-        logger.info(f"Model report generated: {output_path}")
-        
+        logger.info(f"PDF report generated from TXT file: {output_path}")
+
         return output_path
     
     def save_model(self, output_path: Optional[str] = None) -> str:
@@ -709,11 +747,7 @@ class AutoModeler:
             if tune_hyperparameters:
                 tuning_results = self.tune_hyperparameters()
             
-            # Generate visualizations
-            visualization_paths = self.generate_visualizations()
-            
-            # Generate model report
-            report_path = self.generate_model_report()
+
             
             # Save the model
             model_path = self.save_model()
@@ -726,8 +760,6 @@ class AutoModeler:
                 "best_score": self.best_score,
                 "model_results": model_results,
                 "tuning_results": tuning_results,
-                "visualization_paths": visualization_paths,
-                "report_path": report_path,
                 "model_path": model_path,
                 "training_log": self.training_log
             }
