@@ -6,6 +6,12 @@ nginx.conf
 __pycache__/
 test.py
 streamlit_front.py
+fonts/
+
+*.ibynb
+*.ipynb_checkpoints
+
+test*
 
 # Logs
 logs
@@ -34,7 +40,7 @@ dist-ssr
 
 # Files
 /datasets
-/models
+models/
 /reports
 /scripts
 /uploads
@@ -43,3 +49,4 @@ dist-ssr
 /venv/lib/
 /venv/lib/python3.10/
 reports/
+myenv/

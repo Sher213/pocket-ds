@@ -52,6 +52,7 @@ class DatasetProcessor:
         self.analysis_results = {}
         self.backup_path = f"{dataset_path}.backup"
         self.target_column = target_column
+        self.cleaned_dataset_path = dataset_path.replace(".csv", "_cleaned.csv")
         
         # Create necessary directories
         os.makedirs("logs", exist_ok=True)
@@ -139,7 +140,9 @@ class DatasetProcessor:
                 column_types[column] = "text"
 
         self.analysis_results["column_types"] = column_types
+        
         print(f"Detected column types: {column_types}")
+
         return column_types
     
     def handle_missing_values(self, strategy: str = "auto") -> Dict[str, int]:
@@ -270,6 +273,7 @@ class DatasetProcessor:
         return removed_rows
     
     def format_num_vars(self, column_types: dict) -> None:
+        print(self.df.dtypes)
         for column, col_type in column_types.items():
             if col_type == "numeric":
                 # Convert to numeric type
@@ -316,34 +320,22 @@ class DatasetProcessor:
                 logger.info(f"Applied one-hot encoding to {column}")
                 self.cleaning_log.append(f"Applied one-hot encoding to {column}")
 
-            # Drop the original column
-            self.df.drop(columns=[column], inplace=True)
-
         self.analysis_results["encoded_columns"] = encoded_columns
         return encoded_columns
     
-    def extract_datetime_features(self, columns: Optional[List[str]] = None) -> Dict[str, List[str]]:
+    def extract_datetime_features(self, column_types: dir, columns: Optional[List[str]] = None) -> Dict[str, List[str]]:
         """
         Extract features from datetime columns.
         
         Args:
-            columns: List of datetime columns to process (if None, all datetime columns are processed)
+            column_types: Dictionary of column types
             
         Returns:
             Dictionary mapping original column names to their extracted feature columns
         """
         extracted_features = {}
-        
-        if columns is None:
-            # Try to identify datetime columns
-            for column in self.df.columns:
-                try:
-                    pd.to_datetime(self.df[column])
-                    columns = [column]
 
-                    
-                except:
-                    pass
+        columns = [col for col, col_type in column_types.items() if col_type == "datetime"]
         
         if not columns:
             logger.info("No datetime columns found for feature extraction")
@@ -409,7 +401,7 @@ class DatasetProcessor:
         if removed_rows > 0:
             logger.info(f"Removed {removed_rows} duplicate rows")
             self.cleaning_log.append(f"Removed {removed_rows} duplicate rows")
-        
+
         return removed_rows
     
     def generate_summary_statistics(self) -> Dict[str, Any]:
@@ -543,47 +535,49 @@ class DatasetProcessor:
         self.analysis_results["visualizations"] = visualization_paths
         return visualization_paths
     
-    def generate_eda_report(self, output_path: str = "reports/eda_report.pdf") -> str:
+    def generate_eda_report(self, output_dir: str = "reports") -> str:
         """
-        Generate a comprehensive EDA report.
+        Generate a comprehensive EDA report as both PDF and TXT with unique timestamped filenames.
         
         Args:
-            output_path: Path to save the report
-            
+            output_dir: Directory to save the reports
+
         Returns:
-            Path to the generated report
+            Path to the generated PDF report
         """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_path = os.path.join(output_dir, f"eda_report_{timestamp}.pdf")
+        txt_path = os.path.join(output_dir, f"eda_report_{timestamp}.txt")
+
+        # Ensure directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
         # Generate summary statistics if not already done
         if "summary_statistics" not in self.analysis_results:
             self.generate_summary_statistics()
-        
-        # Generate correlation matrix if not already done
+
         if "correlation_matrix" not in self.analysis_results:
             self.generate_correlation_matrix()
-        
-        # Generate visualizations if not already done
+
         if "visualizations" not in self.analysis_results:
             self.generate_visualizations()
-        
-        # Create PDF report
+
+        # --- PDF generation ---
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
-        
-        # Use built-in fonts instead of custom fonts
+
         pdf.set_font("Arial", "B", 16)
         pdf.cell(0, 10, "Exploratory Data Analysis Report", ln=True, align="C")
         pdf.ln(10)
-        
-        # Dataset Overview
+
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Dataset Overview", ln=True)
         pdf.set_font("Arial", "", 12)
         pdf.cell(0, 10, f"Dataset: {os.path.basename(self.dataset_path)}", ln=True)
         pdf.cell(0, 10, f"Rows: {self.df.shape[0]}, Columns: {self.df.shape[1]}", ln=True)
         pdf.ln(5)
-        
-        # Column Types
+
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Column Types", ln=True)
         pdf.set_font("Arial", "", 12)
@@ -591,8 +585,7 @@ class DatasetProcessor:
         for column, col_type in column_types.items():
             pdf.cell(0, 10, clean_text(f"{column}: {col_type}"), ln=True)
         pdf.ln(5)
-        
-        # Missing Values
+
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Missing Values", ln=True)
         pdf.set_font("Arial", "", 12)
@@ -601,8 +594,7 @@ class DatasetProcessor:
             if count > 0:
                 pdf.cell(0, 10, clean_text(f"{column}: {count} missing values"), ln=True)
         pdf.ln(5)
-        
-        # Numeric Summary
+
         if self.analysis_results["summary_statistics"]["numeric_summary"]:
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 10, "Numeric Summary", ln=True)
@@ -612,8 +604,7 @@ class DatasetProcessor:
                 pdf.cell(0, 10, clean_text(f"  Mean: {stats['mean']:.2f}, Median: {stats['median']:.2f}, Std: {stats['std']:.2f}"), ln=True)
                 pdf.cell(0, 10, clean_text(f"  Min: {stats['min']:.2f}, Max: {stats['max']:.2f}, Skew: {stats['skew']:.2f}"), ln=True)
             pdf.ln(5)
-        
-        # Categorical Summary
+
         if self.analysis_results["summary_statistics"]["categorical_summary"]:
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 10, "Categorical Summary", ln=True)
@@ -621,22 +612,99 @@ class DatasetProcessor:
             for column, stats in self.analysis_results["summary_statistics"]["categorical_summary"].items():
                 pdf.cell(0, 10, clean_text(f"{column}: {stats['unique_values']} unique values"), ln=True)
                 pdf.cell(0, 10, "  Top values:", ln=True)
-                for value, count in stats['top_values'].items():
+                for value, count in stats["top_values"].items():
                     pdf.cell(0, 10, clean_text(f"    {value}: {count}"), ln=True)
             pdf.ln(5)
-        
-        # Cleaning Log
+
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Data Cleaning Steps", ln=True)
         pdf.set_font("Arial", "", 12)
         for step in self.cleaning_log:
             pdf.cell(0, 10, clean_text(f"- {step}"), ln=True)
         pdf.ln(5)
-        
-        # Save the report
-        pdf.output(output_path)
-        logger.info(f"EDA report generated: {output_path}")
-        
+
+        pdf.output(pdf_path)
+        logger.info(f"EDA PDF report generated: {pdf_path}")
+
+        # Also generate TXT report with the same timestamp
+        self.generate_eda_text_report(output_path=txt_path)
+
+        return pdf_path, txt_path
+    
+    def generate_eda_text_report(self, output_path: str = "reports/eda_report.txt") -> str:
+        """
+        Generate a comprehensive EDA report as a plain text file.
+
+        Args:
+            output_path: Path to save the report
+
+        Returns:
+            Path to the generated text report
+        """
+        if "summary_statistics" not in self.analysis_results:
+            self.generate_summary_statistics()
+
+        if "correlation_matrix" not in self.analysis_results:
+            self.generate_correlation_matrix()
+
+        if "visualizations" not in self.analysis_results:
+            self.generate_visualizations()
+
+        with open(output_path, "w", encoding="utf-8") as file:
+            file.write("Exploratory Data Analysis Report\n")
+            file.write("=" * 40 + "\n\n")
+
+            # Dataset Overview
+            file.write("Dataset Overview\n")
+            file.write("-" * 20 + "\n")
+            file.write(f"Dataset: {os.path.basename(self.dataset_path)}\n")
+            file.write(f"Rows: {self.df.shape[0]}, Columns: {self.df.shape[1]}\n\n")
+
+            # Column Types
+            file.write("Column Types\n")
+            file.write("-" * 20 + "\n")
+            column_types = self.detect_column_types()
+            for column, col_type in column_types.items():
+                file.write(f"{column}: {col_type}\n")
+            file.write("\n")
+
+            # Missing Values
+            file.write("Missing Values\n")
+            file.write("-" * 20 + "\n")
+            missing_values = self.df.isnull().sum()
+            for column, count in missing_values.items():
+                if count > 0:
+                    file.write(f"{column}: {count} missing values\n")
+            file.write("\n")
+
+            # Numeric Summary
+            if self.analysis_results["summary_statistics"]["numeric_summary"]:
+                file.write("Numeric Summary\n")
+                file.write("-" * 20 + "\n")
+                for column, stats in self.analysis_results["summary_statistics"]["numeric_summary"].items():
+                    file.write(f"{column}:\n")
+                    file.write(f"  Mean: {stats['mean']:.2f}, Median: {stats['median']:.2f}, Std: {stats['std']:.2f}\n")
+                    file.write(f"  Min: {stats['min']:.2f}, Max: {stats['max']:.2f}, Skew: {stats['skew']:.2f}\n")
+                file.write("\n")
+
+            # Categorical Summary
+            if self.analysis_results["summary_statistics"]["categorical_summary"]:
+                file.write("Categorical Summary\n")
+                file.write("-" * 20 + "\n")
+                for column, stats in self.analysis_results["summary_statistics"]["categorical_summary"].items():
+                    file.write(f"{column}: {stats['unique_values']} unique values\n")
+                    file.write("  Top values:\n")
+                    for value, count in stats["top_values"].items():
+                        file.write(f"    {value}: {count}\n")
+                file.write("\n")
+
+            # Cleaning Log
+            file.write("Data Cleaning Steps\n")
+            file.write("-" * 20 + "\n")
+            for step in self.cleaning_log:
+                file.write(f"- {step}\n")
+
+        logger.info(f"EDA text report generated: {output_path}")
         return output_path
     
     def prepare_for_modeling(self, target_column: str, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
@@ -651,8 +719,11 @@ class DatasetProcessor:
         Returns:
             Tuple of (X_train, X_test, y_train, y_test)
         """
+        # format target column
+        target_column = target_column.lower().replace(' ', '_').replace('-', '_')
+
         # Check if target column exists
-        if target_column not in self.df.columns:
+        if target_column not in [col.lower() for col in self.df.columns.tolist()]:
             raise ValueError(f"Target column '{target_column}' not found in the dataset")
 
         # Separate features and target
@@ -746,11 +817,11 @@ class DatasetProcessor:
             logger.info("Starting dataset cleaning process")
             self.cleaning_log.append("Starting dataset cleaning process")
             
-            # Step 1: Detect column types
-            column_types = self.detect_column_types()
-            
-            # Step 2: Standardize column names
+            # Step 1: Standardize column names
             self.standardize_column_names()
+
+            # Step 2: Detect column types
+            column_types = self.detect_column_types()
             
             # Step 3: Handle missing values
             missing_counts = self.handle_missing_values()
@@ -773,11 +844,7 @@ class DatasetProcessor:
             self.encode_categorical_variables(column_types)
             
             # Step 7: Extract datetime features
-            self.extract_datetime_features()
-
-            ##### Step 8: Drop all Old Columns Compare new vs old vals?????
-            #print(self.df.columns)
-            #self.df.drop(columns=[col for col in self.df.columns if col in self.original_df.columns], axis=1, inplace=True)
+            self.extract_datetime_features(column_types)
 
             # Save the cleaned dataset
             cleaned_path = self.save_cleaned_dataset()

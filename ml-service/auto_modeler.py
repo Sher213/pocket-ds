@@ -455,12 +455,12 @@ class AutoModeler:
         else:  # regression
             return "neg_mean_squared_error"
     
-    def generate_model_report(self, output_path: str = "reports/model_report.pdf") -> str:
+    def generate_model_report(self, output_dir: str = "reports") -> str:
         """
-        Generate a comprehensive model report.
+        Generate a comprehensive model report with a timestamped filename.
         
         Args:
-            output_path: Path to save the report
+            output_dir: Directory to save the report
             
         Returns:
             Path to the generated report
@@ -468,23 +468,31 @@ class AutoModeler:
         if self.best_model is None:
             raise ValueError("No best model has been selected yet")
         
+        # Create unique filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"model_report_{timestamp}.pdf"
+        output_path = os.path.join(output_dir, filename)
+
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
         # Create PDF report
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
         
-        # Use built-in fonts instead of custom fonts
+        # Use built-in fonts
         pdf.set_font("Arial", "B", 16)
         pdf.cell(0, 10, "Model Evaluation Report", ln=True, align="C")
         pdf.ln(10)
-        
+
         # Problem Type
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Problem Type", ln=True)
         pdf.set_font("Arial", "", 12)
         pdf.cell(0, 10, f"Type: {self.problem_type.capitalize()}", ln=True)
         pdf.ln(5)
-        
+
         # Best Model
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Best Model", ln=True)
@@ -492,61 +500,53 @@ class AutoModeler:
         pdf.cell(0, 10, f"Model: {self.best_model_name}", ln=True)
         pdf.cell(0, 10, f"Score: {self.best_score:.4f}", ln=True)
         pdf.ln(5)
-        
-        # Model Comparison
+
+        # Model Comparison Table
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Model Comparison", ln=True)
         pdf.set_font("Arial", "", 12)
-        
-        # Create a table header
+
         if self.problem_type == "classification":
             pdf.cell(50, 10, "Model", 1, 0, "C")
             pdf.cell(35, 10, "Accuracy", 1, 0, "C")
             pdf.cell(35, 10, "Precision", 1, 0, "C")
             pdf.cell(35, 10, "Recall", 1, 0, "C")
             pdf.cell(35, 10, "F1 Score", 1, 1, "C")
-        else:  # regression
+        else:
             pdf.cell(50, 10, "Model", 1, 0, "C")
             pdf.cell(35, 10, "MSE", 1, 0, "C")
             pdf.cell(35, 10, "RMSE", 1, 0, "C")
             pdf.cell(35, 10, "MAE", 1, 0, "C")
             pdf.cell(35, 10, "R²", 1, 1, "C")
-        
-        # Add model results to the table
+
         for name, result in self.model_results.items():
             pdf.cell(50, 10, name, 1, 0, "C")
-            
             if self.problem_type == "classification":
                 pdf.cell(35, 10, f"{result['metrics'].get('accuracy', 0):.4f}", 1, 0, "C")
                 pdf.cell(35, 10, f"{result['metrics'].get('precision', 0):.4f}", 1, 0, "C")
                 pdf.cell(35, 10, f"{result['metrics'].get('recall', 0):.4f}", 1, 0, "C")
                 pdf.cell(35, 10, f"{result['metrics'].get('f1', 0):.4f}", 1, 1, "C")
-            else:  # regression
+            else:
                 pdf.cell(35, 10, f"{result['metrics'].get('mse', 0):.4f}", 1, 0, "C")
                 pdf.cell(35, 10, f"{result['metrics'].get('rmse', 0):.4f}", 1, 0, "C")
                 pdf.cell(35, 10, f"{result['metrics'].get('mae', 0):.4f}", 1, 0, "C")
                 pdf.cell(35, 10, f"{result['metrics'].get('r2', 0):.4f}", 1, 1, "C")
         
         pdf.ln(5)
-        
-        # Feature Importance (if available)
+
+        # Feature Importance
         if hasattr(self.best_model, "feature_importances_"):
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 10, "Feature Importance", ln=True)
             pdf.set_font("Arial", "", 12)
-            
-            # Get feature importance
+
             importances = self.best_model.feature_importances_
             feature_names = self.X_train.columns.tolist()
-            
-            # Sort features by importance
             indices = np.argsort(importances)[::-1]
-            
-            # Create a table header
+
             pdf.cell(100, 10, "Feature", 1, 0, "C")
             pdf.cell(90, 10, "Importance", 1, 1, "C")
-            
-            # Add top 10 features to the table
+
             for i in range(min(10, len(indices))):
                 idx = indices[i]
                 pdf.cell(100, 10, feature_names[idx], 1, 0, "C")
@@ -559,8 +559,7 @@ class AutoModeler:
         pdf.set_font("Arial", "", 12)
         for step in self.training_log:
             pdf.cell(0, 10, f"- {step}", ln=True)
-        
-        # Save the report
+
         pdf.output(output_path)
         logger.info(f"Model report generated: {output_path}")
         

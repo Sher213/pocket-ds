@@ -21,6 +21,30 @@ from dataset_processor import DatasetProcessor
 
 load_dotenv()
 
+def ask_gpt_to_identify_irrelevant_columns(columns, sample_data, target_column):
+    prompt = f"""
+    Given the following dataset columns and sample data, identify which columns are irrelevant for predicting the target variable, {target_column}:
+            
+    Columns: {columns}
+    Sample Data:
+    {sample_data}
+            
+    Provide a list of column names that should be removed.
+    """
+            
+    llm = LLM_API("""You are an expert data scientist well trained in the ability to identify irrelevant features for model training."
+    Ensure to follow these rules: 1) Only include the names of the columns - no explanation is necessary, 
+    2) Ignore the target feature, 3) Organize the irrelevant feature names neatly with no other decorators or text.
+    4) Do not remove the encoded columns - if you see encoded columns, find the original column name and remove it instead.
+    5) If you see a column name that is a combination of two columns, remove the original columns instead of the combined column.""")
+    response = llm.send_prompt(prompt)
+            
+    irrelevant_columns = response.split("\n")
+
+    print("Irrelevant columns identified by GPT: ", irrelevant_columns)
+
+    return [col.strip() for col in irrelevant_columns if col.strip() in columns]
+
 class LLM_API:
     def __init__(self, system_message):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -105,7 +129,7 @@ class AnalysisPredictor(LLM_API):
         return self.problem
 
 class BestModelIdentifier():
-    def __init__(self, problem_type):
+    def __init__(self, problem_type='regression'):
         """
         Initialize with the problem type.
         :param problem_type: "regression", "classification", "sentiment", or "time-series"
@@ -149,32 +173,12 @@ class BestModelIdentifier():
 
     def process_csv(self, csv, target):
         threshold = 50
-
-        def ask_chatgpt_to_identify_irrelevant_columns(columns, sample_data):
-            prompt = f"""
-            Given the following dataset columns and sample data, identify which columns are irrelevant for predicting the target variable:
-            
-            Columns: {columns}
-            Sample Data:
-            {sample_data}
-            
-            Provide a list of column names that should be removed.
-            """
-            
-            llm = LLM_API("""You are an expert data analyst well trained in the ability to identify irrelevant features for model training."
-                      Ensure to follow these rules: 1) Only include the names of the columns - no explanation is necessary, 
-                      2) Ignore the target feature, 3) Organize the irrelevant feature names neatly with no other decorators or text.""")
-            response = llm.send_prompt(prompt)
-            
-            irrelevant_columns = response.split("\n")
-
-            return [col.strip() for col in irrelevant_columns if col.strip() in columns]
         
         dataset = pd.read_csv(f"datasets/{csv}")
         
         # Ask ChatGPT to check which columns are irrelevant
         sample_data = dataset.head(5).to_dict()
-        irrelevant_columns = ask_chatgpt_to_identify_irrelevant_columns(dataset.columns.tolist(), sample_data)
+        irrelevant_columns = self.ask_gpt_to_identify_irrelevant_columns(dataset.columns.tolist(), sample_data)
         dataset.drop(columns=irrelevant_columns, errors='ignore', inplace=True)
 
         encoded_dataset = dataset.select_dtypes(include=[np.number]).copy()
@@ -284,17 +288,19 @@ class BestModelIdentifier():
         print(f"Trained ARIMA model with AIC: {self.best_score:.4f}")
 
 class ReportCreator():
-    def __init__(self, dataset, model, problem_type):
+    def __init__(self, dataset_path, model=None, problem_type=None):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
         self.problem_type = problem_type
-        self.dataset = f"datasets/{dataset}"
-        print(model)
+        self.dataset_path = dataset_path
+
         self.model = model
 
         self.report = None
 
         self.reports_dir = "datasets/"
+
+        self.df = pd.read_csv(self.dataset_path)
     
     def create_visuals(self, X_test, y_test, predictions):
         """Generate and save visualizations for model evaluation.
@@ -323,29 +329,81 @@ class ReportCreator():
 
         print("Visuals saved in 'reports/' directory.")
     
-    def generate_text_report(self, X_train, X_test, y_train, y_test, predictions, score):
+    def generate_eda_report_with_gpt(self, output_path="reports/eda_report.txt"):
         """Generate a detailed text-based model evaluation report using OpenAI API."""
 
+        # Read the eda report from the file
+        with open(output_path, "r") as file:
+            eda_report = file.read()
+
         # Generate report with OpenAI API
-        prompt = f"""
-        Generate a comprehensive report analyzing a machine learning model.
-        Model Type: {type(self.model).__name__}
-        Dataset: {pd.read_csv(self.dataset).head()}
-        Problem Type: {self.problem_type}
-        Model Score: {list(score.keys())[0]}: {score[list(score.keys())[0]]}
+        prompt = f"""You are an expert data analyst. Generate a comprehensive report analyzing the provided dataset.
 
-        Include:
-        - Overview of the model.
-        - Explanation of feature importance (if available).
-        - Analysis of evaluation metrics (make them specific to task, i.e regression considers MSE, classification considers accuracy, etc.).
-        - Recommendations for model improvement.
+**Dataset:**
 
-        Do Not Include:
-        - ROC Curve
-        - Confusion Matrix
+{self.df.sample(n=10).to_string()}
 
-        Provide a detailed and well-structured report.
-        """
+**Dataset EDA Statistics:**
+{eda_report}
+
+**Report Requirements:**
+
+**1. Data Understanding and Preprocessing:**
+
+* **Initial Overview:** Describe the dataset's structure, including the number of rows and columns, and the names and data types of each column.
+* **Missing Value Analysis:** Identify any missing values in each column. Report the percentage of missing values for each column and suggest potential strategies for handling them (e.g., imputation, removal), without actually performing the imputation/removal.
+* **Data Type Assessment:** Review the data types of each column and identify any potential inconsistencies or columns that might need type conversion for analysis.
+* **Summary Statistics:** Provide descriptive statistics (mean, median, standard deviation, min, max, quartiles) for numerical columns and frequency counts for categorical columns. Highlight any initial observations or potential outliers based on these statistics.
+
+**2. Exploratory Data Analysis (EDA):**
+
+* **Univariate Analysis:** Analyze the distribution of individual variables.
+    * For numerical variables, create histograms or box plots to visualize their distributions, identify skewness, and potential outliers. Describe the key characteristics of each distribution.
+    * For categorical variables, create bar charts to visualize the frequency of each category. Describe the dominant categories and any imbalances.
+* **Bivariate Analysis:** Explore the relationships between pairs of variables.
+    * For numerical-numerical pairs, create scatter plots to visualize correlations. Calculate and report the Pearson correlation coefficient (if appropriate) and interpret the relationship.
+    * For categorical-categorical pairs, create contingency tables and consider using stacked bar charts or grouped bar charts to visualize the relationship. You can also mention the possibility of using chi-squared tests for independence (without performing them).
+    * For numerical-categorical pairs, create box plots or violin plots to compare the distribution of the numerical variable across different categories of the categorical variable. Describe any observed differences.
+* **Multivariate Analysis (Optional but Encouraged):** If the dataset has more than a few relevant features, discuss potential multivariate relationships or interactions that might be worth investigating further. This could involve suggesting the use of techniques like pair plots or dimensionality reduction for visualization (without actually performing them).
+
+**3. Task Definition and Evaluation Metrics:**
+
+* **Infer the Potential Task:** Based on the features and potential target variables in the dataset, infer what a likely predictive modeling task could be (e.g., classification, regression, clustering). Clearly state the inferred task and the potential target variable(s).
+* **Specify Relevant Evaluation Metrics:** Based on the inferred task, list and briefly explain the key evaluation metrics that would be appropriate for assessing the performance of a model trained on this data.
+    * **For Regression:** Explain metrics like Mean Squared Error (MSE), Root Mean Squared Error (RMSE), Mean Absolute Error (MAE), and R-squared.
+    * **For Binary Classification:** Explain metrics like Accuracy, Precision, Recall, F1-score, and AUC-ROC.
+    * **For Multiclass Classification:** Explain metrics like Accuracy, Precision (macro/micro/weighted), Recall (macro/micro/weighted), F1-score (macro/micro/weighted), and potentially the confusion matrix.
+    * **For Clustering (if inferred):** Discuss metrics like Silhouette Score, Davies-Bouldin Index, or visual inspection.
+
+**4. Potential Trends and Insights:**
+
+* Based on your EDA, describe any potential trends or patterns you observe in the data. For example:
+    * Are there any variables that seem strongly correlated?
+    * Are there any noticeable differences in a numerical variable across different categories?
+    * Are there any time-based trends (if the data includes a time component)?
+    * Are there any unusual or unexpected distributions?
+* Provide actionable insights based on these trends. What business questions could these insights help answer? What potential hypotheses could be formed for further investigation?
+
+**5. Further Analysis and Next Steps:**
+
+* Suggest potential avenues for further analysis or modeling based on your initial findings. This could include:
+    * Specific feature engineering steps that might be beneficial.
+    * Types of predictive models that could be explored.
+    * Further data exploration techniques that could provide deeper understanding.
+    * Considerations for data cleaning and preprocessing.
+
+**Report Structure:**
+
+Organize your report clearly with the following sections:
+
+1.  **Introduction:** Briefly state the purpose of the report and the dataset being analyzed.
+2.  **Data Understanding and Preprocessing**
+3.  **Exploratory Data Analysis (EDA)**
+4.  **Task Definition and Evaluation Metrics**
+5.  **Potential Trends and Insights**
+6.  **Further Analysis and Next Steps**
+7.  **Conclusion:** Summarize the key findings and recommendations.
+"""
 
         # Call OpenAI API
         completion = self.client.chat.completions.create(
@@ -355,53 +413,56 @@ class ReportCreator():
         report_text = completion.choices[0].message.content
 
         # Save text to file
-        report_path = f"{self.reports_dir}/model_report.txt"
-        with open(report_path, "w") as file:
+        with open(output_path, "w") as file:
             file.write(report_text)
 
-        print(f"✅ Text report saved as '{report_path}'")
+        print(f"✅ GPT Text report saved as '{output_path}'")
         return report_text
 
-    def save_report_as_pdataset(self, report_text):
-        """Generate and save the full report as a Pdataset."""
-        pdataset = FPDF()
-        pdataset.set_auto_page_break(auto=True, margin=15)
-        pdataset.add_page()
-        pdataset.set_font("Arial", "B", 16)
-        pdataset.cell(200, 10, "Model Evaluation Report", ln=True, align="C")
+    def save_report_as_pdf(self, text_file_path, output_path="reports/model_report.pdf"):
+        # Read file content
+        with open(text_file_path, "r") as file:
+            report_text = file.read()
+
+        """Generate and save the full report as a pdf."""
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(200, 10, "Model Evaluation Report", ln=True, align="C")
 
         # Add model overview
-        pdataset.set_font("Arial", size=12)
-        pdataset.multi_cell(0, 10, report_text)
+        pdf.set_font("Arial", size=12)
+        pdf.multi_cell(0, 10, report_text)
 
         # Add visuals if available
-        pdataset.add_page()
-        pdataset.set_font("Arial", "B", 14)
-        pdataset.cell(200, 10, "Visual Analysis", ln=True, align="C")
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(200, 10, "Visual Analysis", ln=True, align="C")
 
         roc_path = f"{self.reports_dir}/roc_curve.png"
         cm_path = f"reports/confusion_matrix.png"
 
         if os.path.exists(roc_path):
-            pdataset.image(roc_path, x=30, y=50, w=150)
-            pdataset.ln(85)  # Space after ROC curve
+            pdf.image(roc_path, x=30, y=50, w=150)
+            pdf.ln(85)  # Space after ROC curve
 
         if os.path.exists(cm_path):
-            pdataset.image(cm_path, x=30, y=140, w=150)
+            pdf.image(cm_path, x=30, y=140, w=150)
 
-        # Save final Pdataset
-        pdataset_path = f"{self.reports_dir}/model_report.pdataset"
-        pdataset.output(pdataset_path)
-        print(f"✅ Full report saved as '{pdataset_path}'")
+        # Save final pdf
+        pdf_path = f"{self.reports_dir}/model_report.pdf"
+        pdf.output(output_path)
+        print(f"✅ GPT Full EDA PDF report saved as '{output_path}'")
 
     def create_full_report(self, X_train, X_test, y_train, y_test, predictions, score):
-        """Generate visuals, a text report, and a Pdataset."""
+        """Generate visuals, a text report, and a pdf."""
         self.create_visuals(X_test, y_test, predictions)
         report_text = self.generate_text_report(X_train, X_test, y_train, y_test, predictions, score)
 
         def clean_text(text):
             return re.sub(r'[^\x00-\x7F]+', ' ', text)
-        self.save_report_as_pdataset(clean_text(report_text))
+        self.save_report_as_pdf(clean_text(report_text))
 
 class DatasetScriptor(LLM_API, DatasetProcessor):
     def __init__(self, dataset, target_column):
@@ -424,6 +485,7 @@ class DatasetScriptor(LLM_API, DatasetProcessor):
         self.analysis_results = {}
         self.backup_path = f"{self.dataset_path}.backup"
         self.target_column = target_column
+        self.cleaned_dataset_path = self.dataset_path.replace(".csv", "_cleaned.csv")
         # Create necessary directories
         os.makedirs("logs", exist_ok=True)
         os.makedirs("reports", exist_ok=True)
@@ -693,7 +755,7 @@ except Exception as e:
     
         return self.dataset_path, self.dataset
 
-predictor = AnalysisPredictor(dataset="20250314_144422_insurance.csv", target_class="charges")
+'''predictor = AnalysisPredictor(dataset="20250314_144422_insurance.csv", target_class="charges")
 problem_type = predictor.predict_problem()
 bmi = BestModelIdentifier(problem_type)
 
@@ -704,9 +766,9 @@ reporter = ReportCreator("20250314_144422_insurance.csv", bmi.best_model, proble
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 pred, score = bmi.predict(X_test, y_test)
-reporter.create_full_report(X_train, X_test, y_train, y_test, pred, score)
+reporter.create_full_report(X_train, X_test, y_train, y_test, pred, score)'''
 
 
-script_gen = DatasetScriptor('insurance.csv', target_column="charges")
+#script_gen = DatasetScriptor('insurance.csv', target_column="charges")
 #script_gen.use_dataset_scriptor(target_class="charges")
-script_gen.clean_dataset()
+#script_gen.clean_dataset()
