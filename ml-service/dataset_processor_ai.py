@@ -34,8 +34,8 @@ Based on your expert data science knowledge, provide a list containing only the 
 Remember the following constraints:
 
 List Only Removals: Your output should only include the names of the columns you want to remove. Do not list columns you intend to keep for training.
-Target Preservation: Do not include the name of the {target_column} in your list of columns to remove.
-Encoded Column Handling: If any original categorical columns are present in the {columns} and the {sample_data} suggests they have been encoded (e.g., one-hot encoded), include the names of the original categorical columns in your removal list, not the encoded columns themselves.
+Encoded Column Handling: If any original categorical columns are present in the {columns} and the {sample_data} suggests they have been encoded (e.g., one-hot encoded), include the names of the original categorical columns in your removal list, not the encoded columns themselves **HINT: If the name of a column is "column_name_encoded", it is safe to remove "column_name" from {columns}.
+Target Preservation: Do not include the name of the {target_column} in your list of columns to remove unless it has been encoded.
 Provide your list of columns to remove here:"""
             
     llm = LLM_API("""As an expert data scientist skilled in identifying irrelevant features for model training, you will be provided with a list of columns. Your task is to identify and list only the names of the columns that should be removed before training a machine learning model.
@@ -43,7 +43,7 @@ Ensure you adhere to the following strict rules:
 Output Format: Only include the names of the columns you want to remove. Do not include the names of columns you intend to use for training.
 Target Preservation: Do not include the name of the target variable in your list of columns to remove.
 Encoded Column Handling: If any original categorical columns have been encoded into new numerical columns, include the names of the original categorical columns in your list for removal. Do not remove the encoded columns themselves""")
-    response = llm.send_prompt(prompt)
+    response = llm.prompt(prompt)
 
     print("RESPONSE: ", response)
 
@@ -65,7 +65,7 @@ class LLM_API:
             {"role": "system", "content": self.system_message}
         ]  # Initialize messages with the system message
 
-    def send_prompt(self, prompt):
+    def prompt(self, prompt):
         # Send a prompt to the OpenAI API
         completion = self.client.chat.completions.create(
             model="gpt-4o-mini",  # Corrected the model name to "gpt-4"
@@ -79,7 +79,7 @@ class LLM_API:
         self.messages.append({"role": "user", "content": prompt})
         
         # Get the response from the API
-        response = self.send_prompt(prompt)
+        response = self.prompt(prompt)
         
         # Return the response from the model
         return response
@@ -117,7 +117,7 @@ class AnalysisPredictor(LLM_API):
                     Determine and return the corresponding number. Return only the number.
                     """
         
-        prediction = super().send_prompt(message)
+        prediction = super().prompt(message)
         
         print("Prediction: ", prediction)
 
@@ -422,11 +422,26 @@ DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVET
 """
 
         # Call OpenAI API
-        completion = self.client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        report_text = completion.choices[0].message.content
+        llm = LLM_API("""You are an expert data analyst and Exploratory Data Analysis (EDA) specialist. Your primary function is to generate comprehensive and insightful data analysis reports. When presented with a dataset and a reporting objective, you will:
+
+1. **Conduct a thorough Exploratory Data Analysis (EDA)** to understand the data's structure, quality, patterns, and potential issues. This includes:
+    * **Examining data types and distributions of individual variables.**
+    * **Identifying missing values, outliers, and inconsistencies.**
+    * **Exploring relationships between variables using visualizations and statistical methods.**
+    * **Formulating initial hypotheses and insights based on the EDA findings.**
+2. **Structure the report logically** with clear sections such as:
+    * **Introduction:** Briefly outlining the data and the reporting objective.
+    * **Data Overview:** Describing the dataset's key characteristics and any data cleaning steps taken.
+    * **Exploratory Data Analysis:** Presenting key findings from the EDA with relevant visualizations and statistical summaries. Explain the insights derived from each analysis.
+    * **Insights and Observations:** Summarizing the main patterns, trends, and potential areas of interest identified during EDA.
+    * **Limitations:** Acknowledging any limitations of the data or the analysis.
+    * **(Optional) Recommendations/Next Steps:** Suggesting further analysis or actions based on the EDA findings.
+3. **Utilize appropriate visualizations** (e.g., histograms, scatter plots, box plots, correlation matrices) to effectively communicate data characteristics and relationships. Ensure visualizations are clear, labeled, and accompanied by concise interpretations.
+4. **Include relevant statistical summaries** (e.g., descriptive statistics, correlation coefficients) to support your visual findings.
+5. **Maintain a clear, concise, and professional writing style**, explaining technical terms where necessary for the intended audience.
+6. **Focus on uncovering meaningful insights** from the data through the EDA process and clearly articulating their implications in the report.""")
+        
+        report_text = llm.prompt(prompt)
 
         # Save text to file
         with open(output_path, "w", encoding='utf-8') as file:
@@ -546,11 +561,27 @@ DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVET
     """
 
         # Call OpenAI API
-        completion = self.client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        report_text = completion.choices[0].message.content
+        llm = LLM_API("""You are a highly knowledgeable data scientist and machine learning expert with expertise in statistical analysis, data preprocessing, model selection, and evaluation techniques. Your training includes extensive data up to October 2023, encompassing the latest advancements in machine learning algorithms, frameworks, and best practices.
+
+Your primary goal is to generate comprehensive and insightful machine learning reports. When presented with a dataset and a prediction or classification task, you will:
+
+1. **Conduct a thorough Exploratory Data Analysis (EDA)** to understand the data's characteristics, identify potential issues (missing values, outliers), and discover initial patterns relevant to the task.
+2. **Perform appropriate data preprocessing techniques**, justifying your choices (e.g., handling missing data, feature scaling, encoding categorical variables).
+3. **Select and implement relevant machine learning models**, explaining the rationale behind your model selection and considering multiple options where appropriate.
+4. **Apply rigorous model evaluation techniques**, including appropriate metrics and validation strategies (e.g., cross-validation), to assess model performance and generalization ability.
+5. **Structure the report logically** with clear sections such as:
+    * **Introduction:** Defining the problem, the dataset, and the objective.
+    * **Exploratory Data Analysis:** Presenting key EDA findings with visualizations and statistical summaries relevant to the modeling task.
+    * **Data Preprocessing:** Detailing the steps taken to prepare the data for modeling and the reasoning behind these steps.
+    * **Model Selection and Implementation:** Describing the models considered, the chosen model(s), and the implementation process.
+    * **Model Evaluation:** Presenting the evaluation results, including relevant metrics and interpretations.
+    * **Results and Discussion:** Summarizing the model performance, discussing the key findings, and interpreting the results in the context of the problem.
+    * **Limitations and Future Work:** Acknowledging any limitations of the data or the modeling process and suggesting potential future improvements.
+6. **Utilize clear visualizations and statistical summaries** throughout the report to support your analysis and findings.
+7. **Maintain a clear, concise, and professional writing style**, explaining technical concepts where necessary.
+8. **Focus on providing actionable insights** derived from the machine learning process and clearly articulating their implications.""")
+        
+        report_text = llm.prompt(prompt)
 
         # Save to file
         with open(output_path, "w", encoding= 'utf-8') as file:
