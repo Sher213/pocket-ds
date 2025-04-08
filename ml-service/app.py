@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import os
 import logging
-from dataset_processor_ai import DatasetScriptor, ReportCreator, ask_gpt_to_identify_irrelevant_columns
+from dataset_processor_ai import DatasetLLM, DatasetScriptor, ReportCreator, ask_gpt_to_identify_irrelevant_columns
 from auto_modeler import AutoModeler
 
 # ===================== Setup Logging =====================
@@ -45,6 +45,7 @@ app.mount("/reports", StaticFiles(directory="reports"), name="reports")
 
 processing_results: Dict[str, dict] = {}
 
+dLLM = None
 # ===================== Models =====================
 
 class DatasetMetadata(BaseModel):
@@ -91,8 +92,56 @@ os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
 
 # ===================== Endpoints =====================
 
+@app.post("/dataset/llm")
+async def prompt_llm(data: dict = Body(...)):
+    """
+    Endpoint to handle prompts for the DatasetLLM.
+    Expects a JSON body with "prompt" and "filename" fields.
+
+    Example request payload:
+    {
+        "prompt": "Your question or instruction for the LLM.",
+        "filename": "20250408_my_dataset.csv"
+    }
+    """
+    prompt = data.get("prompt")
+    filename = data.get("filename")
+    
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required.")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename is required.")
+    
+    if filename not in processing_results:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    
+    try:
+        model_content = None
+        eda_content = None
+        
+        # Read model report if available
+        model_report_path = processing_results[filename].get("model_report_path")
+        if model_report_path:
+            with open(model_report_path, "r", encoding="utf-8") as file:
+                model_content = file.read()
+        
+        # Read EDA report text if available
+        eda_report_path_txt = processing_results[filename].get("eda_report_path_txt")
+        if eda_report_path_txt:
+            with open(eda_report_path_txt, "r", encoding="utf-8") as file:
+                eda_content = file.read()
+        
+        # Process the prompt using the DatasetLLM functionality
+        response = dLLM.prompt_whist(prompt, eda_content, model_content)
+        return {"prompt": prompt, "response": response}
+    except Exception as e:
+        logger.exception("Error processing LLM prompt")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/dataset/upload")
 async def upload_file(file: UploadFile = File(...), target_column: str = Form(...)):
+    global dLLM
+    
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{timestamp}_{file.filename}"
@@ -128,6 +177,10 @@ async def upload_file(file: UploadFile = File(...), target_column: str = Form(..
         }
 
         logger.info(f"File {filename} uploaded and processed successfully.")
+
+        dLLM = DatasetLLM(df, target_column)
+
+        logger.info(f"Created Dataset LLM for {df.head()}.")
 
         return {
             "filename": filename,
@@ -175,6 +228,8 @@ async def clean_dataset(data: Dict):
         report_creator.save_report_as_pdf(eda_report_txt_path, eda_report_pdf_path)
 
     logger.info(f"Cleaning complete for: {filename}")
+
+    processing_results[filename]["eda_report_path_txt"] = eda_report_txt_path
 
     return {
         "message": "Dataset cleaned successfully",
@@ -230,6 +285,10 @@ async def train_model(filename: str = Query(...), config: ModelingConfig = Body(
         reporter.generate_model_report_with_gpt(report_path_txt, report_path_txt)
         reporter.save_report_as_pdf(report_path_txt, report_path)
 
+    processing_results[filename]["model_report_path_txt"] = report_path_txt
+    # --- Add this line to store the model file path in processing_results ---
+    processing_results[filename]["model_path"] = results["model_path"]
+
     return {
         "message": "Model training complete",
         "best_model_name": results["best_model_name"],
@@ -239,6 +298,21 @@ async def train_model(filename: str = Query(...), config: ModelingConfig = Body(
         "visualization_paths": visualization_paths,
         "training_log": results["training_log"]
     }
+
+@app.get("/model/download/{filename}")
+async def download_model(filename: str):
+    # Check that the dataset exists in our processing results
+    if filename not in processing_results:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    # Get the stored model file path from the processing results
+    model_path = processing_results[filename].get("model_path")
+    if not model_path or not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail="Trained model file not found")
+    return FileResponse(
+        model_path,
+        filename=os.path.basename(model_path),
+        media_type="application/octet-stream"
+    )
 
 @app.get("/dataset/report/{filename}")
 async def get_eda_report(filename: str):
@@ -313,4 +387,4 @@ async def get_model_visualization(filename: str, viz_type: str):
 # ===================== Run Server =====================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="localhost", port=8000, reload=True)
