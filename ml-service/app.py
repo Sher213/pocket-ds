@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import os
 import logging
-from dataset_processor_ai import DatasetLLM, DatasetScriptor, ReportCreator, ask_gpt_to_identify_irrelevant_columns
+from dataset_processor_ai import LLM_API, DatasetLLM, ModelLLM, DatasetScriptor, ReportCreator, ask_gpt_to_identify_irrelevant_columns
 from auto_modeler import AutoModeler
 
 # ===================== Setup Logging =====================
@@ -94,48 +94,121 @@ os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
 
 @app.post("/dataset/llm")
 async def prompt_llm(data: dict = Body(...)):
-    """
-    Endpoint to handle prompts for the DatasetLLM.
-    Expects a JSON body with "prompt" and "filename" fields.
+    decider = LLM_API("""You are an expert system for determining the appropriate API for a given Data Science and Machine Learning task. Your decision is based on whether the user's prompt can be directly answered using the provided dataset alone, or if it necessitates the application of a pre-existing machine learning model.
 
-    Example request payload:
-    {
-        "prompt": "Your question or instruction for the LLM.",
-        "filename": "20250408_my_dataset.csv"
-    }
-    """
+**Decision Criteria:**
+
+* **Dataset API (Output: 1):** The user's prompt requests information retrieval, aggregation, filtering, or basic analysis that can be performed solely by querying or manipulating the dataset. No predictive modeling or complex transformations beyond standard data operations are required.
+
+* **Model API (Output: 2):** The user's prompt requires the application of a machine learning model to generate a prediction, classification, embedding, or other model-driven output. The dataset serves as input to the model through the API.
+
+**Your Task:**
+
+Analyze the user's prompt and determine whether a dataset API or a model API is the appropriate tool to fulfill the request. Output your decision as a single integer: `1` for Dataset API, `2` for Model API.
+
+**Constraints:**
+
+* You must output only the integer `1` or `2`.
+* Do not provide any explanations or justifications for your decision.
+
+**Example Scenarios (for internal reasoning, do not output these):**
+
+* **Prompt:** "What is the average age of customers in the dataset?" (Dataset API needed - Answer: 1)
+* **Prompt:** "Predict the probability of churn for customer ID 123." (Model API needed - Answer: 2)
+* **Prompt:** "List all products with a price greater than $100." (Dataset API needed - Answer: 1)
+* **Prompt:** "Generate a customer segment for the following user features: age 35, income $50,000." (Model API needed - Answer: 2)""")
+    
     prompt = data.get("prompt")
     filename = data.get("filename")
+    target_column = data.get('target_column')
     
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt is required.")
     if not filename:
         raise HTTPException(status_code=400, detail="Filename is required.")
-    
     if filename not in processing_results:
         raise HTTPException(status_code=404, detail="Dataset not found.")
     
+    logger.info(f"Using file {filename} for LLM Chat.")
+
     try:
-        model_content = None
-        eda_content = None
-        
-        # Read model report if available
-        model_report_path = processing_results[filename].get("model_report_path")
-        if model_report_path:
-            with open(model_report_path, "r", encoding="utf-8") as file:
-                model_content = file.read()
-        
-        # Read EDA report text if available
-        eda_report_path_txt = processing_results[filename].get("eda_report_path_txt")
-        if eda_report_path_txt:
-            with open(eda_report_path_txt, "r", encoding="utf-8") as file:
-                eda_content = file.read()
-        
-        # Process the prompt using the DatasetLLM functionality
-        response = dLLM.prompt_whist(prompt, eda_content, model_content)
-        return {"prompt": prompt, "response": response}
+        decision = decider.prompt(prompt)
     except Exception as e:
-        logger.exception("Error processing LLM prompt")
+        raise HTTPException(status_code=404, detail="Error getting decision from LLM.")
+
+    logger.info(f"Decision for LLM API was to use: {decision}.")
+
+    try:
+        if '1' in decision:
+            model_content = ""
+            eda_content = ""
+            
+            # Read model report if available
+            model_report_path = processing_results[filename].get("model_report_path")
+            if model_report_path:
+                with open(model_report_path, "r", encoding="utf-8") as file:
+                    model_content = file.read()
+                
+                logger.info("Read Model Report.")
+            
+            # Read EDA report text if available
+            eda_report_path_txt = processing_results[filename].get("eda_report_path_txt")
+            if eda_report_path_txt:
+                with open(eda_report_path_txt, "r", encoding="utf-8") as file:
+                    eda_content = file.read()
+
+                    logger.info("Read EDA Report.")
+            
+            data_needed_decider = LLM_API(f"""You are a data and analyst report expert. Your task is to analyze a given natural language prompt and determine if the Exploratory Data Analysis (EDA) report, the Model report, or the Dataset (or any combination thereof) are required to fulfill the request in the prompt.
+
+Your output MUST be a list containing only the names of the required items, in string format, such as ["eda", "model", "dataset", "target_column"]. Do not include any other text or explanation in your response.
+
+For example, if the prompt requires an EDA report and the dataset, your output should be:
+["eda", "dataset"]
+
+If the prompt only requires a model report, your output should be:
+["model"]
+
+And so on. Remember to only output the list and nothing else.""")
+            
+            data_needed = data_needed_decider.prompt_whist(f"""{prompt} 
+Use the provided data (considering 'dataset', 'model report', 'eda report', and 'target_column'). If the number of features in the input does not match the number of columns expected based on the dataset schema, impute the missing columns with a suitable filler value using the dataset.""")
+
+            logger.info(f"Decided on needing: {data_needed}.")
+
+            # Process the prompt using the DatasetLLM functionality
+            dLLM.add_data(target_column, eda_content, model_content)
+            response = dLLM.prompt_whist(prompt, data_needed)
+
+            logger.info(f"Response: {response}.")
+
+            return {"prompt": prompt, "response": response}
+        elif '2' in decision:
+            model_path = processing_results[filename]["model_path"]
+            dataset = filename
+            target_column = processing_results[filename]["target_class"]
+
+            if not model_path:
+                raise HTTPException(status_code=404, detail="Model not trained. Could not find the model file.")
+            if dataset is None or len(dataset) == 0:
+                raise HTTPException(status_code=404, detail="Error getting dataset.")
+            if not target_column:
+                raise HTTPException(status_code=404, detail="Error getting target column.")
+
+            modelLLM = ModelLLM(model_path)
+            features = processing_results[filename]["model_features"]
+
+            logger.info(f"Loaded ModelLLM. Asking for prediction on model: {model_path}.")
+            logger.info(f"Features passed: {features}.")
+
+            response = modelLLM.predict(prompt, dataset, features, target_column)
+
+            logger.info(f"Prediction: {response}.")
+
+            return {"prompt": prompt, "response": response}
+
+    except Exception as e:
+        logger.exception("Error processing LLM prompt.")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/dataset/upload")
@@ -178,7 +251,7 @@ async def upload_file(file: UploadFile = File(...), target_column: str = Form(..
 
         logger.info(f"File {filename} uploaded and processed successfully.")
 
-        dLLM = DatasetLLM(df, target_column)
+        dLLM = DatasetLLM(df)
 
         logger.info(f"Created Dataset LLM for {df.head()}.")
 
@@ -261,6 +334,9 @@ async def train_model(filename: str = Query(...), config: ModelingConfig = Body(
     )
 
     logger.info(f"Columns to remove: {columns_to_remove}")
+
+    processing_results[filename]["columns_removed"] = columns_to_remove
+
     df = df.drop(columns=columns_to_remove)
     processor.df = df
 
@@ -269,6 +345,10 @@ async def train_model(filename: str = Query(...), config: ModelingConfig = Body(
         test_size=config.test_size,
         random_state=config.random_state
     )
+
+    logger.info(f"Used: {X_train.columns} features to train model.")
+
+    processing_results[filename]["model_features"] = X_train.columns
 
     modeler = AutoModeler(X_train, y_train, X_test, y_test)
     results = modeler.auto_model(tune_hyperparameters=config.tune_hyperparameters)
@@ -291,8 +371,10 @@ async def train_model(filename: str = Query(...), config: ModelingConfig = Body(
 
     return {
         "message": "Model training complete",
+        "columns_removed": columns_to_remove,
         "best_model_name": results["best_model_name"],
         "best_score": results["best_score"],
+        "tuning_results": results["tuning_results"],
         "model_path": results["model_path"],
         "report_path": report_path,
         "visualization_paths": visualization_paths,
@@ -348,6 +430,8 @@ async def get_dataset_visualization(filename: str, viz_type: str):
         matched = [f for f in html_files if "distributions" in f]
     elif viz_type == "boxplot":
         matched = [f for f in html_files if "bar_chart" in f]
+    elif viz_type == "correlation heatmap":
+        matched = [f for f in html_files if "correlation" in f]
     else:
         logger.warning(f"Invalid viz_type requested: {viz_type}")
         raise HTTPException(status_code=400, detail=f"Invalid visualization type: {viz_type}")

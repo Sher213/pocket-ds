@@ -21,6 +21,8 @@ from dataset_processor import DatasetProcessor
 
 load_dotenv()
 
+MODEL_CONTEXT = 12000
+
 def ask_gpt_to_identify_irrelevant_columns(columns, sample_data, target_column):
     prompt = f"""Given the following information about a dataset, identify the columns that are likely irrelevant for predicting the specified target variable in a machine learning model.
 
@@ -85,9 +87,8 @@ class LLM_API:
         return response
 
 class DatasetLLM(LLM_API):
-    def __init__(self, dataset, target_column):
+    def __init__(self, dataset):
         self.dataset = dataset
-        self.target_column = target_column
 
         super().__init__(f"""You are a helpful, expert data analyst and information retriever. Your primary goal is to accurately and comprehensively answer user questions based on the provided dataset.
 
@@ -107,21 +108,172 @@ class DatasetLLM(LLM_API):
 
 7.  **Maintain a Helpful and Respectful Tone:** Always strive to be helpful and respectful in your responses.
                          
-8.  **Do not use code to provide a response, always provide directly what was asked for. 
-                         
-INFO:
-                         
-The target column is: {self.target_column}.
+8.  **Do not use code to provide a response, always provide directly what was asked for.""")
 
-The dataset is: {self.dataset.to_string()}.""")
+    def add_data(self, target_column, eda_report, model_report):
+        self.target_column = target_column
+        self.eda_report = eda_report
+        self.model_report = model_report
 
-    def prompt_whist(self, prompt, eda_report=None, model_report=None):
+    def prompt_whist(self, prompt, data_needed):
         full_prompt = f"{prompt}"
-        if eda_report:
-            full_prompt += f"\n\nEDA Report:\n{eda_report}"
-        if model_report:
-            full_prompt += f"\n\nModel Report:\n{model_report}"
-        return super().prompt_whist(full_prompt)
+        
+        if "eda_report" in data_needed:
+            full_prompt += f"\n\nEDA Report:\n{self.eda_report}"
+        if "model_report" in data_needed:
+            full_prompt += f"\n\nModel Report:\n{self.model_report}"
+        if "dataset" in data_needed:
+            try:
+                full_prompt += f"\n\nDataset:\n{self.dataset.to_string()}"
+            except Exception as e:
+                full_prompt += f"\n\nDataset:\n[Error loading dataset: {e}]"
+        if "target_column" in data_needed:
+            full_prompt += f"\n\nTarget Column:\n{self.target_column}"
+
+        return super().prompt_whist(full_prompt if len(full_prompt) < MODEL_CONTEXT else full_prompt[:MODEL_CONTEXT])
+    
+class ModelLLM(LLM_API):
+    def __init__(self, model_path):
+        self.model_path = model_path
+
+        super().__init__(f"""You are a highly skilled Data Scientist and Machine Learning Expert. Your primary function is to generate a Python script that, when executed, will load a pre-trained machine learning model located at the specified `{model_path}` and use it to predict an outcome based on user-provided input.
+
+**Your operational guidelines are as follows:**
+
+1.  **Identify the Model Type:** Based on the `{model_path}` (which might implicitly or explicitly suggest the model type, e.g., `.pkl` for scikit-learn, `.h5` for Keras, `.pt` for PyTorch), infer the likely machine learning library used to train the model.
+
+2.  **Determine Necessary Libraries:** Import all Python libraries essential for loading the identified model type and processing input data. This will likely include libraries like `pickle`, `joblib`, `tensorflow`, `keras`, `torch`, `numpy`, and potentially `pandas` or `sklearn.preprocessing` depending on the expected input format and model requirements.
+
+3.  **Implement the Loading Mechanism:** Write the code to load the model from the given `{model_path}`. Ensure robust error handling in case the file is not found or is corrupted.
+
+4.  **Preprocess the User Input:** Numerically encode relevant string/object features in the user input using the encoding schemes (Label Encoding, One-Hot Encoding) derived from the dataset. 
+
+5.  **Missing Features:** For any features present in the dataset but missing from the user input, impute the missing values using the most statistically appropriate method derived from the dataset (e.g., mean for numerical features, mode for categorical features). Ensure all expected features are present and filled to allow for model prediction.
+
+4.  **Implement the Prediction Logic:** Write the code to feed the processed input data to the loaded model's prediction function (`predict`, `predict_proba`, etc.).
+
+5.  **Format the Output:** Structure the output in a clear and understandable way. This might involve printing the predicted class label, probability scores, or a more descriptive interpretation of the prediction.
+
+6:  **Executable:** Ensure your response is executable as is, this means there are no comments or instructions.
+
+7:  **Process User Prompt:** The user will pass instructions. Use them to derive the features for the prediction.
+
+**Example Scenario (Illustrative - Your script should be more general):**
+
+If `{model_path}` suggests a scikit-learn model, your script might:
+
+* Import `pickle` and `numpy`.
+* Load the model using `pickle.load()`.
+* You will already have the features and target column.
+* Use `model.predict()` to get the prediction.
+* Print the predicted class label and any other information asked for.
+
+By following these guidelines, you will create a robust and well-documented script that enables prediction using the specified pre-trained model.""")
+
+    def predict(self, prompt, dataset, features, target_column):
+        """
+        Generates a Python script that loads a pre-trained machine learning model,
+        prompts the user for input based on the specified column names, and has the model
+        automatically discern which inputs to use as features. THe features that cannot be
+        automatically passed to the model are looked up in the dataset, and their encoded value is pulled.
+        The script then performs a prediction for the target column and prints the results.
+
+        The generated script performs these steps:
+        1. Loads a pre-trained model from self.model_path.
+        2. Pull encoded values for non-processable values.
+        3. Any missing features that are not in the user input should be imputed to ensure all features are present to allow for model prediction.
+        4. Uses the loaded model to predict the outcome for the given target column.
+        5. Prints the prediction result, including any probabilities or additional model output.
+
+        Parameters:
+            prompt (str):
+            dataset (DataFrame): 
+            column_names (list or str): A list or comma-separated string of column names for which
+                the user will provide input.
+            target_column (str): The name of the target column that the model will predict.
+
+        Returns:
+            str: The captured output from executing the generated script, including any errors.
+        """
+        try:
+            dataset = pd.read_csv(f"datasets/{dataset.split('.')[0]}_cleaned.csv")
+
+            # Generate the Python script with detailed instructions.
+            script = super().prompt(f"""Generate a Python script that performs the following: {prompt}
+
+Ensure to:
+1. **Load a pre-trained machine learning model** located at the path: `{self.model_path}`.
+2. **Preprocess any non-numeric data** to match what the model expects. For example, if the model was trained on encoded string/object columns, ensure the same encoding is applied by referencing the dataset. 
+3. **Fill any missing features** required for model prediction that are not provided in the user input. Use the full list of features expected by the model: {features}. For each missing feature, impute a value using an appropriate statistical method (mean, median, or mode) based on the dataset.
+4. **Convert the final input into a pandas DataFrame**, ensuring each value is wrapped in a list to avoid scalar-related errors.
+5. **Use the loaded model to predict** the outcome for the target column: `{target_column}`.
+6. **Print the prediction result** clearly. If the model provides probabilities or other metadata, include them in the output.
+
+**Important Considerations:**
+
+* **Error Handling:** Add error handling for common issues such as file not found, invalid input types, and prediction errors.
+* **Library Imports:** Import all required libraries (e.g., `pickle`, `joblib`, `tensorflow`, `torch`, `numpy`, `pandas`).
+* **Executability:** Do not include any markdown, comments, or extra formatting—just pure Python code that can be executed as-is.
+
+Model Features:
+{features}
+
+Dataset Sample:
+{dataset}""")
+            
+            # Validate that a script was generated.
+            if not script:
+                raise ValueError("Script generation failed: No script was returned.")
+            
+            # Clean script
+            script = script.replace("```python", "").replace("```", "")
+
+            with open("scripts/generated_script.py", "w", encoding="utf-8") as file:
+                file.write(script)
+
+            import os
+            import subprocess
+
+            # Get the current working directory.
+            current_dir = os.getcwd()
+
+            # Build the paths.
+            activate_script = os.path.join(current_dir, "myenv", "Scripts", "Activate.ps1")
+            generated_script = os.path.join(current_dir, "scripts", "generated_script.py")
+
+            # Construct a PowerShell command:
+            # - NoProfile avoids loading extra profiles.
+            # - ExecutionPolicy Bypass ensures that the activation script runs even if policies would normally block it.
+            # - The command dot-sources the activation script (with a leading period and space), then runs the generated script.
+            command = (
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+                f'"& {{ . \\"{activate_script}\\"; python \\"{generated_script}\\" }}"'
+            )
+
+            print("Executing command:")
+            print(command)
+
+            # Execute the command in PowerShell using subprocess.
+            result = subprocess.run(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+
+            # Build a robust error message by including the return code and stderr output.
+            output = result.stdout
+            if result.returncode != 0:
+                output += f"\n[ERROR] Command exited with non-zero return code: {result.returncode}"
+            if result.stderr:
+                print("\nStandard error output:\n" + result.stderr)
+
+            return output
+        
+        except Exception as e:
+            print(f"Error generating or executing the prediction script: {e}")
+            raise
 
 class AnalysisPredictor(LLM_API):
     def __init__(self, dataset, target_class):

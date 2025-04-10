@@ -25,6 +25,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import scipy.stats as stats
+import mpld3
 
 # Configure logging
 os.makedirs("logs", exist_ok=True)
@@ -531,18 +532,36 @@ class AutoModeler:
             lines.append(row)
         lines.append("")
 
-        # Feature Importance
+        # Feature Importance (if available)
         if hasattr(self.best_model, "feature_importances_"):
             lines.append(">> Feature Importance")
             importances = self.best_model.feature_importances_
             feature_names = self.X_train.columns.tolist()
             indices = np.argsort(importances)[::-1]
-
             lines.append("Feature\tImportance")
             for i in range(min(10, len(indices))):
                 idx = indices[i]
                 lines.append(f"{feature_names[idx]}\t{importances[idx]:.4f}")
             lines.append("")
+
+        # --- NEW SECTION: Correlation Statistics ---
+        # Only include if the target variable is numeric.
+        if pd.api.types.is_numeric_dtype(self.y_train):
+            lines.append(">> Correlation Statistics (Feature vs Target)")
+            try:
+                # Compute correlation of each feature with the target variable.
+                correlations = self.X_train.apply(lambda col: self.y_train.corr(col))
+                # Sort correlations by absolute value, descending.
+                correlations = correlations.sort_values(key=lambda x: abs(x), ascending=False)
+                lines.append("Feature\tCorrelation")
+                for feature, corr in correlations.items():
+                    lines.append(f"{feature}\t{corr:.4f}")
+            except Exception as e:
+                lines.append("Could not compute correlation statistics: " + str(e))
+            lines.append("")
+        else:
+            lines.append(">> Correlation Statistics")
+            lines.append("Target variable is non-numeric; correlation statistics not available.\n")
 
         # Training Log
         lines.append(">> Training Log")
@@ -670,7 +689,7 @@ class AutoModeler:
             fig.write_html(cm_path)
             visualization_paths["confusion_matrix"] = cm_path
             
-            # ROC Curve (if model supports predict_proba)
+            # ROC Curve
             if hasattr(self.best_model, "predict_proba"):
                 try:
                     y_prob = self.best_model.predict_proba(X_test_scaled)[:, 1]
@@ -684,7 +703,7 @@ class AutoModeler:
                     visualization_paths["roc_curve"] = roc_path
                 except:
                     pass
-        
+
         else:  # regression
             # Actual vs Predicted
             fig = go.Figure()
@@ -707,22 +726,37 @@ class AutoModeler:
             residuals_path = f"{output_dir}/residuals.html"
             fig.write_html(residuals_path)
             visualization_paths["residuals"] = residuals_path
-        
-        # Feature Importance (if available)
+
+        # Feature Importance
         if hasattr(self.best_model, "feature_importances_"):
             importances = self.best_model.feature_importances_
             feature_names = self.X_train.columns.tolist()
             
-            # Sort features by importance
             indices = np.argsort(importances)[::-1]
-            top_indices = indices[:10]  # Top 10 features
+            top_indices = indices[:10]
             
             fig = go.Figure(data=go.Bar(x=[feature_names[i] for i in top_indices], y=[importances[i] for i in top_indices]))
             fig.update_layout(title="Top 10 Feature Importance", xaxis_title="Feature", yaxis_title="Importance")
             importance_path = f"{output_dir}/feature_importance.html"
             fig.write_html(importance_path)
             visualization_paths["feature_importance"] = importance_path
-        
+
+        # Seaborn Heatmap of the raw dataframe
+        plt.figure(figsize=(10, 8))
+        try:
+            df_sample = self.X_train.copy()
+            df_sample = df_sample.select_dtypes(include=[np.number]).corr()
+            ax = sns.heatmap(df_sample, annot=True)
+            plt.title("Correlation Heatmap")
+            html_heatmap = mpld3.fig_to_html(ax.get_figure())
+            heatmap_path = f"{output_dir}/correlation_heatmap.html"
+            with open(heatmap_path, "w", encoding="utf-8") as f:
+                f.write(html_heatmap)
+            visualization_paths["correlation_heatmap"] = heatmap_path
+            plt.close()
+        except Exception as e:
+            print(f"Failed to create seaborn heatmap: {e}")
+
         return visualization_paths
     
     def auto_model(self, tune_hyperparameters: bool = True) -> Dict[str, Any]:
@@ -746,8 +780,6 @@ class AutoModeler:
             tuning_results = None
             if tune_hyperparameters:
                 tuning_results = self.tune_hyperparameters()
-            
-
             
             # Save the model
             model_path = self.save_model()
