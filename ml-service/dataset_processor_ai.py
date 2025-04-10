@@ -45,7 +45,11 @@ Ensure you adhere to the following strict rules:
 Output Format: Only include the names of the columns you want to remove. Do not include the names of columns you intend to use for training.
 Target Preservation: Do not include the name of the target variable in your list of columns to remove.
 Encoded Column Handling: If any original categorical columns have been encoded into new numerical columns, include the names of the original categorical columns in your list for removal. Do not remove the encoded columns themselves""")
-    response = llm.prompt(prompt)
+    
+    try:
+        response = llm.prompt(prompt)
+    except Exception as e:
+        return ["Error getting target columns."]
 
     print("RESPONSE: ", response)
 
@@ -68,13 +72,16 @@ class LLM_API:
         ]  # Initialize messages with the system message
 
     def prompt(self, prompt):
-        # Send a prompt to the OpenAI API
-        completion = self.client.chat.completions.create(
-            model="gpt-4o-mini",  # Corrected the model name to "gpt-4"
-            messages=self.messages + [{"role": "user", "content": prompt}]
-        )
-        # Return the content of the first choice's message
-        return completion.choices[0].message.content
+        try:
+            # Send a prompt to the OpenAI API
+            completion = self.client.chat.completions.create(
+                model="gpt-4o-mini",  # Corrected the model name to "gpt-4"
+                messages=self.messages + [{"role": "user", "content": prompt}]
+            )
+            # Return the content of the first choice's message
+            return completion.choices[0].message.content
+        except Exception as e:
+            return "Error from OpenAI API."
 
     def prompt_whist(self, prompt):
         # Appending the user prompt to the message list
@@ -87,8 +94,9 @@ class LLM_API:
         return response
 
 class DatasetLLM(LLM_API):
-    def __init__(self, dataset):
+    def __init__(self, file_name, dataset):
         self.dataset = dataset
+        self.file_name = file_name
 
         super().__init__(f"""You are a helpful, expert data analyst and information retriever. Your primary goal is to accurately and comprehensively answer user questions based on the provided dataset.
 
@@ -129,7 +137,9 @@ class DatasetLLM(LLM_API):
                 full_prompt += f"\n\nDataset:\n[Error loading dataset: {e}]"
         if "target_column" in data_needed:
             full_prompt += f"\n\nTarget Column:\n{self.target_column}"
-
+        
+        full_prompt += f"**If they ask for the file name**, give {self.file_name}."
+        
         return super().prompt_whist(full_prompt if len(full_prompt) < MODEL_CONTEXT else full_prompt[:MODEL_CONTEXT])
     
 class ModelLLM(LLM_API):

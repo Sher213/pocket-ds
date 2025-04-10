@@ -251,7 +251,7 @@ async def upload_file(file: UploadFile = File(...), target_column: str = Form(..
 
         logger.info(f"File {filename} uploaded and processed successfully.")
 
-        dLLM = DatasetLLM(df)
+        dLLM = DatasetLLM(file_path, df)
 
         logger.info(f"Created Dataset LLM for {df.head()}.")
 
