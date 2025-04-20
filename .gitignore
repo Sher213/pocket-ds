@@ -5,7 +5,6 @@ datasets/
 nginx.conf
 __pycache__/
 test.py
-streamlit_front.py
 fonts/
 scripts/
 
