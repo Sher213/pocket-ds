@@ -3,6 +3,17 @@ node_modules/
 .dockerignore
 datasets/
 nginx.conf
+__pycache__/
+test.py
+fonts/
+scripts/
+
+*.ibynb
+*.ipynb_checkpoints
+
+test*
+
+*DEPRECATED*
 
 # Logs
 logs
@@ -31,7 +42,7 @@ dist-ssr
 
 # Files
 /datasets
-/models
+models/
 /reports
 /scripts
 /uploads
@@ -39,3 +50,5 @@ dist-ssr
 /venv/
 /venv/lib/
 /venv/lib/python3.10/
+reports/
+myenv/
