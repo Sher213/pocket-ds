@@ -1,29 +1,26 @@
 import re
 from dotenv import load_dotenv
-from openai import OpenAI
-import numpy as np
+from google import genai
+from google.genai import types
+from google.genai.errors import ClientError, ServerError, APIError
+import httpx
 import matplotlib.pyplot as plt
 import seaborn as sns
 from fpdf import FPDF
 import pandas as pd
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import accuracy_score, mean_squared_error, r2_score
-from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, Lasso
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
-from sklearn.svm import SVC, SVR
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from sklearn.metrics import confusion_matrix, roc_curve, auc
-from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import confusion_matrix
 import os
 from dataset_processor import DatasetProcessor
 
 load_dotenv()
 
-MODEL_CONTEXT = 12000
+API_KEY = os.getenv("GEMINI_API_KEY")
+if not API_KEY:
+    raise RuntimeError("GEMINI_API_KEY not set; cannot initialize GenAI client.")
 
-def ask_gpt_to_identify_irrelevant_columns(columns, sample_data, target_column):
+client = genai.Client(api_key=API_KEY)
+
+def ask_genai_to_identify_irrelevant_columns(columns, sample_data, target_column):
     prompt = f"""Given the following information about a dataset, identify the columns that are likely irrelevant for predicting the specified target variable in a machine learning model.
 
 Dataset Information:
@@ -37,7 +34,7 @@ Remember the following constraints:
 
 List Only Removals: Your output should only include the names of the columns you want to remove. Do not list columns you intend to keep for training.
 Encoded Column Handling: If any original categorical columns are present in the {columns} and the {sample_data} suggests they have been encoded (e.g., one-hot encoded), include the names of the original categorical columns in your removal list, not the encoded columns themselves **HINT: If the name of a column is "column_name_encoded", it is safe to remove "column_name" from {columns}.
-Target Preservation: Do not include the name of the {target_column} in your list of columns to remove unless it has been encoded.
+Target Preservation: **DO NOT** include the name of the {target_column} in your list of columns to remove **UNLESS** it has been encoded. **IF THE TARGET COLUMN IS NOT ENCODED, DO NOT REMOVE IT.**
 Provide your list of columns to remove here:"""
             
     llm = LLM_API("""As an expert data scientist skilled in identifying irrelevant features for model training, you will be provided with a list of columns. Your task is to identify and list only the names of the columns that should be removed before training a machine learning model.
@@ -54,41 +51,52 @@ Encoded Column Handling: If any original categorical columns have been encoded i
     print("RESPONSE: ", response)
 
     # Convert string to list (and clean whitespace)
-    remove_list = [
-        col.strip('[] \n,')
-        for line in response.split('\n')
-        for col  in line.split(',')
-        if col.strip('[] \n,')
-    ]
+    remove_list = [ line.strip("[] \n'") for line in response.strip('[] \n').replace("```", "").split(',') ]
 
-    return [col.strip("[] ") for col in remove_list if col.strip() in columns]
+    return remove_list
 
 class LLM_API:
     def __init__(self, system_message):
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.system_message = system_message
-        self.messages = [
-            {"role": "system", "content": self.system_message}
-        ]  # Initialize messages with the system message
+        self.messages = []
 
     def prompt(self, prompt):
         try:
-            # Send a prompt to the OpenAI API
-            completion = self.client.chat.completions.create(
-                model="gpt-4o-mini",  # Corrected the model name to "gpt-4"
-                messages=self.messages + [{"role": "user", "content": prompt}]
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_message
+                ),
+                contents=prompt
             )
-            # Return the content of the first choice's message
-            return completion.choices[0].message.content
-        except Exception as e:
-            return "Error from OpenAI API."
+            return response.text
+        except ClientError as e:
+            # 4xx error: malformed request, bad input, auth issues, etc.
+            print(f"[ClientError] {e.code} {e.status}: {e.message}")
+            print("Full details JSON:", e.details)
+            # You can also peek at the raw httpx.Response:
+            print("Raw text:", e.response.text)
+
+        except ServerError as e:
+            # 5xx error: server-side problem
+            print(f"[ServerError] {e.code} {e.status}: {e.message}")
+            print("Details:", e.details)
+
+        except APIError as e:
+            # catch-all for any other APIError
+            print(f"[APIError] {e.code} {e.status}: {e.message}")
+            print("Details:", e.details)
+
+        except httpx.HTTPError as e:
+            # network / transport errors
+            print("HTTPX transport error:", str(e))
 
     def prompt_whist(self, prompt):
         # Appending the user prompt to the message list
-        self.messages.append({"role": "user", "content": prompt})
+        self.messages.append(prompt)
         
         # Get the response from the API
-        response = self.prompt(prompt)
+        response = self.prompt(self.messages)
         
         # Return the response from the model
         return response
@@ -140,7 +148,7 @@ class DatasetLLM(LLM_API):
         
         full_prompt += f"**If they ask for the file name**, give {self.file_name}."
         
-        return super().prompt_whist(full_prompt if len(full_prompt) < MODEL_CONTEXT else full_prompt[:MODEL_CONTEXT])
+        return super().prompt_whist(full_prompt)
     
 class ModelLLM(LLM_API):
     def __init__(self, model_path):
@@ -285,227 +293,8 @@ Dataset Sample:
             print(f"Error generating or executing the prediction script: {e}")
             raise
 
-class AnalysisPredictor(LLM_API):
-    def __init__(self, dataset, target_class):
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.system_message = "You are a data analyst expert."
-
-        self.dataset = f"datasets/{dataset}"
-        
-        self.problem = None
-        self.target_class = target_class
-        self.model = None
-
-        self.messages = []
-        
-        dataset = pd.read_csv(self.dataset)
-        
-        if not self.target_class.lower() in [l.lower() for l in dataset.columns]:
-            print("target class not in dataset")
-            raise Exception
-
-    def predict_problem(self):
-        data = pd.read_csv(self.dataset)
-
-        message = f"""{list(data.columns)}
-                    {list(data.iloc[0])}
-                    This is a dataset with one row of data. The target class is {self.target_class}. Predict whether it is a:
-                    1) Regression Problem
-                    2) Classification Problem
-                    3) Sentiment Analysis Problem
-                    4) Time-Series Problem.
-
-                    Determine and return the corresponding number. Return only the number.
-                    """
-        
-        prediction = super().prompt(message)
-        
-        print("Prediction: ", prediction)
-
-        match = re.match(r"\d+", prediction)  # Match one or more digits
-        if match:
-            prediction = int(match.group())  # Convert to integer
-
-            if prediction == 1:
-                self.problem = "regression"
-            elif prediction == 2:
-                self.problem = "classification"
-            elif prediction == 3:
-                self.problem = "sentiment"
-            elif prediction == 4:
-                self.problem = "time-series"
-            else:
-                self.problem = "unknown"  # Handle unexpected values
-        else:
-            self.problem = "invalid input"  # Handle cases where no number is found
-
-        return self.problem
-
-class BestModelIdentifier():
-    def __init__(self, problem_type: str ='regression', target_column: str = None) -> dict:
-        """
-        Initialize with the problem type.
-        :param problem_type: "regression", "classification", "sentiment", or "time-series"
-        """
-        self.problem_type = problem_type
-        self.models = self._get_models()
-        self.best_model = None
-        self.best_score = None
-
-        self.target_column = target_column
-
-    def _get_models(self):
-        """Return a dictionary of models based on the problem type."""
-        if self.problem_type == "classification":
-            return {
-                "LogisticRegression": LogisticRegression(),
-                "RandomForestClassifier": RandomForestClassifier(),
-                "SVM": SVC(),
-                "GradientBoostingClassifier": GradientBoostingClassifier(),
-                "MLPClassifier": MLPClassifier()
-            }
-        elif self.problem_type == "regression":
-            return {
-                "LinearRegression": LinearRegression(),
-                "RandomForestRegressor": RandomForestRegressor(),
-                "SVR": SVR(),
-                "GradientBoostingRegressor": GradientBoostingRegressor(),
-                "Ridge": Ridge(),
-                "Lasso": Lasso()
-            }
-        elif self.problem_type == "sentiment":
-            return {
-                "NaiveBayes": MultinomialNB(),
-                "RandomForestClassifier": RandomForestClassifier(),
-                "SVM": SVC(),
-                "MLPClassifier": MLPClassifier(),
-                "LogisticRegression": LogisticRegression()
-            }
-        elif self.problem_type == "time-series":
-            return {"ARIMA": None}  # ARIMA is trained separately
-        else:
-            raise ValueError("Invalid problem type. Choose 'regression', 'classification', 'sentiment', or 'time-series'.")
-
-    def process_csv(self, csv, target):
-        threshold = 50
-        
-        dataset = pd.read_csv(f"datasets/{csv}")
-        
-        # Ask ChatGPT to check which columns are irrelevant
-        sample_data = dataset.head(5).to_dict()
-        irrelevant_columns = self.ask_gpt_to_identify_irrelevant_columns(dataset.columns.tolist(), sample_data, self.target_column)
-        dataset.drop(columns=irrelevant_columns, errors='ignore', inplace=True)
-
-        encoded_dataset = dataset.select_dtypes(include=[np.number]).copy()
-    
-        for col in dataset.select_dtypes(exclude=[np.number]).columns:
-            if not col == target:
-                unique_count = dataset[col].nunique()
-
-                # Apply One-Hot Encoding if column is categorical (low cardinality)
-                if unique_count <= threshold:
-                    encoded_cols = pd.get_dummies(dataset[col], prefix=col, drop_first=True)
-                    encoded_dataset = pd.concat([encoded_dataset, encoded_cols], axis=1)
-
-                # Apply Label Encoding if column has high cardinality
-                else:
-                    le = LabelEncoder()
-                    encoded_dataset[col] = le.fit_transform(dataset[col].astype(str))
-            else:
-                 encoded_dataset[col] = dataset[target]
-
-        return encoded_dataset[[c for c in encoded_dataset.columns if not c == target]], encoded_dataset[target]
-
-    def fit_and_evaluate(self, X, y, test_size=0.2, metric=None, cv_folds=5):
-        """
-        Train multiple models and evaluate them.
-        :param X: Features
-        :param y: Target
-        :param test_size: Test set proportion
-        :param metric: Custom metric function (optional)
-        :param cv_folds: Number of cross-validation folds
-        """
-        if self.problem_type == "time-series":
-            return self._fit_time_series(y)
-
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
-
-        best_score = -np.inf if self.problem_type in ["classification", "sentiment"] else np.inf
-        best_model = None
-
-        for name, model in self.models.items():
-            model.fit(X_train, y_train)
-            predictions = model.predict(X_test)
-
-            # Classification & Sentiment
-            if self.problem_type in ["classification", "sentiment"]:
-                score = accuracy_score(y_test, predictions) if not metric else metric(y_test, predictions)
-                cv_score = np.mean(cross_val_score(model, X, y, cv=cv_folds, scoring='accuracy'))
-            
-            # Regression
-            else:
-                score = mean_squared_error(y_test, predictions) if not metric else metric(y_test, predictions)
-                cv_score = np.mean(cross_val_score(model, X, y, cv=cv_folds, scoring='neg_mean_squared_error'))
-            
-            print(f"{name} - Test Score: {score:.4f}, CV Score: {cv_score:.4f}")
-
-            # Update best model
-            if (self.problem_type in ["classification", "sentiment"] and score > best_score) or \
-               (self.problem_type == "regression" and score < best_score):
-                best_score = score
-                best_model = model
-
-        self.best_model = best_model
-        self.best_score = best_score
-        print(f"Best Model: {type(self.best_model).__name__} with score: {self.best_score:.4f}")
-
-    def predict(self, X, y):
-        """
-        Make predictions and evaluate the best model.
-        :param X: Features
-        :param y: Target
-        :return: predictions, evaluation metrics
-        """
-        if self.best_model is None:
-            raise Exception("Best model not trained yet. Call 'fit_and_evaluate' first.")
-
-        # Make predictions using the best model
-        predictions = self.best_model.predict(X)
-
-        # Evaluate the model based on the problem type
-        if self.problem_type == "classification" or self.problem_type == "sentiment":
-            accuracy = accuracy_score(y, predictions)
-            print(f"Accuracy: {accuracy:.4f}")
-            return predictions, {"accuracy": accuracy}
-
-        elif self.problem_type == "regression":
-            mse = mean_squared_error(y, predictions)
-            print(f"Mean Squared Error (MSE): {mse:.4f}")
-            return predictions, {"mse": mse}
-
-        elif self.problem_type == "time-series":
-            # For time-series, you can evaluate with some time-series metrics or AIC for ARIMA
-            if hasattr(self.best_model, 'aic'):
-                aic = self.best_model.aic
-                print(f"AIC: {aic:.4f}")
-                return predictions, {"aic": aic}
-            else:
-                raise Exception("Time-series model did not return valid AIC.")
-
-        return predictions, {}
-
-    def _fit_time_series(self, y, order=(5,1,0)):
-        """Train ARIMA model for time series data."""
-        model = ARIMA(y, order=order)
-        model = model.fit()
-        self.best_model = model
-        self.best_score = model.aic  # Lower AIC is better
-        print(f"Trained ARIMA model with AIC: {self.best_score:.4f}")
-
 class ReportCreator():
     def __init__(self, dataset_path, model=None, problem_type=None):
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
         self.problem_type = problem_type
         self.dataset_path = dataset_path
 
@@ -544,14 +333,14 @@ class ReportCreator():
 
         print("Visuals saved in 'reports/' directory.")
     
-    def generate_eda_report_with_gpt(self, output_path="reports/eda_report.txt"):
-        """Generate a detailed text-based model evaluation report using OpenAI API."""
+    def generate_eda_report_with_genai(self, output_path="reports/eda_report.txt"):
+        """Generate a detailed text-based model evaluation report using Gemini API."""
 
         # Read the eda report from the file
         with open(output_path, "r") as file:
             eda_report = file.read()
 
-        # Generate report with OpenAI API
+        # Generate report with Gemini API
         prompt = f"""You are an expert data analyst. Generate a comprehensive report analyzing the provided dataset.
 
 **Dataset:**
@@ -622,7 +411,7 @@ Organize your report clearly with the following sections:
 DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVETICA FONT.
 """
 
-        # Call OpenAI API
+        # Call Gemini API
         llm = LLM_API("""You are an expert data analyst and Exploratory Data Analysis (EDA) specialist. Your primary function is to generate comprehensive and insightful data analysis reports. When presented with a dataset and a reporting objective, you will:
 
 1. **Conduct a thorough Exploratory Data Analysis (EDA)** to understand the data's structure, quality, patterns, and potential issues. This includes:
@@ -648,7 +437,7 @@ DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVET
         with open(output_path, "w", encoding='utf-8') as file:
             file.write(report_text)
 
-        print(f"✅ GPT Text report saved as '{output_path}'")
+        print(f"✅ genai Text report saved as '{output_path}'")
         return report_text
 
     def save_report_as_pdf(self, text_file_path, output_path="reports/model_report.pdf"):
@@ -705,14 +494,14 @@ DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVET
         pdf.output(output_path)
         print(f"✅ PDF report saved as '{output_path}'")
 
-    def generate_model_report_with_gpt(self, model_report_path="reports/model_metrics.txt", output_path="reports/gpt_model_report.txt"):
-        """Generate a detailed model evaluation analysis report using OpenAI API."""
+    def generate_model_report_with_genai(self, model_report_path="reports/model_metrics.txt", output_path="reports/genai_model_report.txt"):
+        """Generate a detailed model evaluation analysis report using Gemini API."""
 
         # Read the model evaluation report (metrics)
         with open(model_report_path, "r") as file:
             model_metrics = file.read()
 
-        # Generate GPT prompt
+        # Generate genai prompt
         prompt = f"""
     You are a senior machine learning engineer and data scientist. Given the model evaluation report below, generate a professional and structured analysis report.
 
@@ -761,7 +550,7 @@ DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVET
     DO NOT USE ANY SPECIAL CHARACTERS. REMAIN COMPLAINT TO UTF-8 ENCODING and HELVETICA FONT.
     """
 
-        # Call OpenAI API
+        # Call Gemini API
         llm = LLM_API("""You are a highly knowledgeable data scientist and machine learning expert with expertise in statistical analysis, data preprocessing, model selection, and evaluation techniques. Your training includes extensive data up to October 2023, encompassing the latest advancements in machine learning algorithms, frameworks, and best practices.
 
 Your primary goal is to generate comprehensive and insightful machine learning reports. When presented with a dataset and a prediction or classification task, you will:
@@ -788,7 +577,7 @@ Your primary goal is to generate comprehensive and insightful machine learning r
         with open(output_path, "w", encoding= 'utf-8') as file:
             file.write(report_text)
 
-        print(f"✅ GPT Model report saved as '{output_path}'")
+        print(f"✅ genai Model report saved as '{output_path}'")
         return report_text
 
     def create_full_report(self, X_train, X_test, y_train, y_test, predictions, score):
@@ -802,13 +591,6 @@ Your primary goal is to generate comprehensive and insightful machine learning r
 
 class DatasetScriptor(LLM_API, DatasetProcessor):
     def __init__(self, dataset, target_column):
-        """Initialize with the dataset file and OpenAI API key."""
-        
-        # LLM_API initialization
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.system_message = "You are a data cleaning and processing expert. Your skills range from data type validation, missing value handling, text standardization, numeric range validation, and duplicate removal, etc. using Python and libraries like pandas, numpy, scikit-learn."
-        self.messages = []
-
         self.dataset_path = f"datasets/{dataset}"
         self.dataset = pd.read_csv(self.dataset_path)
         self.current_script_path = ""
@@ -1103,7 +885,6 @@ reporter = ReportCreator("20250314_144422_insurance.csv", bmi.best_model, proble
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 pred, score = bmi.predict(X_test, y_test)
 reporter.create_full_report(X_train, X_test, y_train, y_test, pred, score)'''
-
 
 #script_gen = DatasetScriptor('insurance.csv', target_column="charges")
 #script_gen.use_dataset_scriptor(target_class="charges")

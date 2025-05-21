@@ -24,24 +24,24 @@ def upload_file(file, target_column):
     response = requests.post(url, files=files, data=data)  # Send target_column in the data
     return response
 
-def clean_dataset(filename, target_class, use_gpt_eda_report):
+def clean_dataset(filename, target_class, use_genai_eda_report):
     url = f"{API_URL}/dataset/clean"
     data = {
         "filename": filename,
         "target_class": target_class,
-        "use_gpt": use_gpt_eda_report
+        "use_genai": use_genai_eda_report
     }
     response = requests.post(url, json=data)
     return response
 
 # Train model function
-def train_model(filename, target_column, use_gpt_model_report=False):
+def train_model(filename, target_column, use_genai_model_report=False):
     url = f"{API_URL}/dataset/model"
     config = {
         "target_column": target_column,
-        # The create_model_with_gpt flag in the config should match the backend's expectation
+        # The create_model_with_genai flag in the config should match the backend's expectation
     }
-    params = {"filename": filename, "use_gpt_model_report": use_gpt_model_report}
+    params = {"filename": filename, "use_genai_model_report": use_genai_model_report}
     response = requests.post(url, json=config, params=params)
     return response
 
@@ -111,8 +111,8 @@ def main():
 
     # Upload dataset settings
     st.write("Settings")
-    generate_gpt_eda_report = st.toggle("Generate EDA Report with GPT", value=False)
-    generate_gpt_model_report = st.toggle("Generate Model Report with GPT", value=False)
+    generate_genai_eda_report = st.toggle("Generate EDA Report with GenAI", value=False)
+    generate_genai_model_report = st.toggle("Generate Model Report with GenAI", value=False)
 
     st.header("Upload Dataset")
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv", key="file_uploader")
@@ -160,7 +160,7 @@ def main():
             st.header("🧹 Clean Dataset")
             if st.button("Clean Dataset"):
                 with st.spinner("Cleaning dataset..."):
-                    clean_response = clean_dataset(filename, target_class, generate_gpt_eda_report)
+                    clean_response = clean_dataset(filename, target_class, generate_genai_eda_report)
                 if clean_response.status_code == 200:
                     st.session_state['cleaned_data'] = clean_response.json()
 
@@ -234,7 +234,7 @@ def main():
         # === Show training data preview before training ===
         if st.button("Train Model"):
             with st.spinner("Training model..."):
-                train_response = train_model(filename, target_class, use_gpt_model_report=generate_gpt_model_report)
+                train_response = train_model(filename, target_class, use_genai_model_report=generate_genai_model_report)
             if train_response.status_code == 200:
                 st.session_state['model_data'] = train_response.json()
                 st.success(st.session_state['model_data']["message"])

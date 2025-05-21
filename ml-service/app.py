@@ -10,8 +10,10 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import os
 import logging
-from dataset_processor_ai import LLM_API, DatasetLLM, ModelLLM, DatasetScriptor, ReportCreator, ask_gpt_to_identify_irrelevant_columns
+from dataset_processor_ai import LLM_API, DatasetLLM, ModelLLM, DatasetScriptor, ReportCreator, ask_genai_to_identify_irrelevant_columns
 from auto_modeler import AutoModeler
+import logging
+import httpx
 
 # ===================== Setup Logging =====================
 logging.basicConfig(
@@ -24,6 +26,21 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# 1a) Configure root logger for DEBUG (prints to console)
+logging.basicConfig(
+    format="%(levelname)s [%(asctime)s] %(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.DEBUG,
+)
+
+# 1b) HTTPX will now log request/response internals at DEBUG
+logging.getLogger("httpx").setLevel(logging.DEBUG)  
+# :contentReference[oaicite:0]{index=0}
+
+# 1c) GenAI SDK logs use the "genai" logger name
+logging.getLogger("genai").setLevel(logging.DEBUG)  
+# (this follows the pattern in the IBM example) :contentReference[oaicite:1]{index=1}
 
 # ===================== App Setup =====================
 app = FastAPI(title="Pocket Data Scientist API")
@@ -102,13 +119,15 @@ async def prompt_llm(data: dict = Body(...)):
 
 * **Model API (Output: 2):** The user's prompt requires the application of a machine learning model to generate a prediction, classification, embedding, or other model-driven output. The dataset serves as input to the model through the API.
 
+* **Both APIs (Output: 3):** The user's prompt requires both the dataset and the model API to fulfill the request. This may involve using the dataset for initial analysis or filtering, followed by applying a model for predictions or further analysis.
+
 **Your Task:**
 
 Analyze the user's prompt and determine whether a dataset API or a model API is the appropriate tool to fulfill the request. Output your decision as a single integer: `1` for Dataset API, `2` for Model API.
 
 **Constraints:**
 
-* You must output only the integer `1` or `2`.
+* You must output only the integer `1` or `2` or `3`.
 * Do not provide any explanations or justifications for your decision.
 
 **Example Scenarios (for internal reasoning, do not output these):**
@@ -194,6 +213,59 @@ Use the provided data (considering 'dataset', 'model report', 'eda report', and 
                 raise HTTPException(status_code=404, detail="Error getting dataset.")
             if not target_column:
                 raise HTTPException(status_code=404, detail="Error getting target column.")
+        elif '3' in decision:
+            model_content = ""
+            eda_content = ""
+            
+            # Read model report if available
+            model_report_path = processing_results[filename].get("model_report_path")
+            if model_report_path:
+                with open(model_report_path, "r", encoding="utf-8") as file:
+                    model_content = file.read()
+                
+                logger.info("Read Model Report.")
+            
+            # Read EDA report text if available
+            eda_report_path_txt = processing_results[filename].get("eda_report_path_txt")
+            if eda_report_path_txt:
+                with open(eda_report_path_txt, "r", encoding="utf-8") as file:
+                    eda_content = file.read()
+
+                    logger.info("Read EDA Report.")
+            
+            data_needed_decider = LLM_API(f"""You are a data and analyst report expert. Your task is to analyze a given natural language prompt and determine if the Exploratory Data Analysis (EDA) report, the Model report, or the Dataset (or any combination thereof) are required to fulfill the request in the prompt.
+
+Your output MUST be a list containing only the names of the required items, in string format, such as ["eda", "model", "dataset", "target_column"]. Do not include any other text or explanation in your response.
+
+For example, if the prompt requires an EDA report and the dataset, your output should be:
+["eda", "dataset"]
+
+If the prompt only requires a model report, your output should be:
+["model"]
+
+And so on. Remember to only output the list and nothing else.""")
+            
+            data_needed = data_needed_decider.prompt_whist(f"""{prompt} 
+Use the provided data (considering 'dataset', 'model report', 'eda report', and 'target_column'). If the number of features in the input does not match the number of columns expected based on the dataset schema, impute the missing columns with a suitable filler value using the dataset.""")
+
+            logger.info(f"Decided on needing: {data_needed}.")
+
+            # Process the prompt using the DatasetLLM functionality
+            dLLM.add_data(target_column, eda_content, model_content)
+            response = dLLM.prompt_whist(prompt, data_needed)
+
+            logger.info(f"Response: {response}.")
+
+            model_path = processing_results[filename]["model_path"]
+            dataset = filename
+            target_column = processing_results[filename]["target_class"]
+
+            if not model_path:
+                raise HTTPException(status_code=404, detail="Model not trained. Could not find the model file.")
+            if dataset is None or len(dataset) == 0:
+                raise HTTPException(status_code=404, detail="Error getting dataset.")
+            if not target_column:
+                raise HTTPException(status_code=404, detail="Error getting target column.")
 
             modelLLM = ModelLLM(model_path)
             features = processing_results[filename]["model_features"]
@@ -201,7 +273,7 @@ Use the provided data (considering 'dataset', 'model report', 'eda report', and 
             logger.info(f"Loaded ModelLLM. Asking for prediction on model: {model_path}.")
             logger.info(f"Features passed: {features}.")
 
-            response = modelLLM.predict(prompt, dataset, features, target_column)
+            response += "\n" + modelLLM.predict(prompt, dataset, features, target_column)
 
             logger.info(f"Prediction: {response}.")
 
@@ -270,7 +342,7 @@ async def upload_file(file: UploadFile = File(...), target_column: str = Form(..
 async def clean_dataset(data: Dict):
     filename = data.get("filename")
     target_class = data.get("target_class")
-    use_gpt = data.get("use_gpt", True)
+    use_genai = data.get("use_genai", True)
 
     logger.info(f"Initiating cleaning for: {filename}")
 
@@ -294,10 +366,10 @@ async def clean_dataset(data: Dict):
     visualizations = processor.generate_visualizations()
     eda_report_pdf_path, eda_report_txt_path = processor.generate_eda_report()
 
-    if use_gpt:
-        logger.info("Generating GPT-based EDA report")
+    if use_genai:
+        logger.info("Generating genai-based EDA report")
         report_creator = ReportCreator(cleaned_path)
-        report_creator.generate_eda_report_with_gpt(eda_report_txt_path)
+        report_creator.generate_eda_report_with_genai(eda_report_txt_path)
         report_creator.save_report_as_pdf(eda_report_txt_path, eda_report_pdf_path)
 
     logger.info(f"Cleaning complete for: {filename}")
@@ -314,7 +386,7 @@ async def clean_dataset(data: Dict):
     }
 
 @app.post("/dataset/model")
-async def train_model(filename: str = Query(...), config: ModelingConfig = Body(...), use_gpt_model_report: bool = False):
+async def train_model(filename: str = Query(...), config: ModelingConfig = Body(...), use_genai_model_report: bool = False):
     logger.info(f"Starting model training for: {filename}")
 
     target_column = processing_results[filename]["target_class"]
@@ -328,8 +400,8 @@ async def train_model(filename: str = Query(...), config: ModelingConfig = Body(
     processor = processing_results[filename]["processor"]
     df = pd.read_csv(processor.cleaned_dataset_path)
 
-    logger.info("Identifying irrelevant columns using GPT")
-    columns_to_remove = ask_gpt_to_identify_irrelevant_columns(
+    logger.info("Identifying irrelevant columns using genai")
+    columns_to_remove = ask_genai_to_identify_irrelevant_columns(
         df.columns.tolist(), df.sample(n=10), target_column
     )
 
@@ -359,10 +431,10 @@ async def train_model(filename: str = Query(...), config: ModelingConfig = Body(
 
     logger.info("Model training completed")
 
-    if use_gpt_model_report:
-        logger.info("Generating GPT-based model report")
+    if use_genai_model_report:
+        logger.info("Generating genai-based model report")
         reporter = ReportCreator(processor.cleaned_dataset_path)
-        reporter.generate_model_report_with_gpt(report_path_txt, report_path_txt)
+        reporter.generate_model_report_with_genai(report_path_txt, report_path_txt)
         reporter.save_report_as_pdf(report_path_txt, report_path)
 
     processing_results[filename]["model_report_path_txt"] = report_path_txt
