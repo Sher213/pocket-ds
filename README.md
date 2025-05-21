@@ -2,23 +2,22 @@
 
 A comprehensive web application that brings the power of data science to your browser. This application enables users to perform data analysis, visualization, machine learning, and reporting seamlessly.
 
+CURRENT: The Prototype works in Streamlit and FastAPI, both located in ml-service directory. See instruction on how to run.
+
 ## Features
 
 - 📊 **Data Import & Handling**: Support for multiple formats (CSV, Excel, JSON, SQL)
 - 🔍 **Exploratory Data Analysis**: Interactive visualizations and statistical analysis
 - 🤖 **Machine Learning**: Pre-built models and AutoML capabilities
 - 📝 **Reporting**: Generate comprehensive analysis reports
-- 👥 **Collaboration**: Share projects and results with team members
-- 📚 **Learning Resources**: Integrated tutorials and documentation
+- 👥 **Collaboration**: Share projects and results with team members (WIP)
+- 📚 **Learning Resources**: Integrated tutorials and documentation (WIP)
 
 ## Tech Stack
 
-- **Frontend**: React.js with TypeScript
+- **Frontend**: React.js with TypeScript, Prototype in Streamlit
 - **Backend**: Node.js with Express
-- **Database**: PostgreSQL
 - **Machine Learning**: Python with scikit-learn, TensorFlow
-- **Authentication**: JWT-based auth system
-- **Cloud Services**: AWS/Azure for deployment
 
 ## Getting Started
 
@@ -67,6 +66,13 @@ pip install -r requirements.txt
 cd frontend
 npm run dev
 
+# OR
+
+# Terminal 1 - PROTOTYPE
+
+cd ml-service
+streamlit run streamlit_front.py
+
 # Terminal 2 - Backend
 cd backend
 npm run dev
@@ -101,5 +107,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Built with ❤️ for data scientists and analysts
-- Powered by OpenAI - (looking to go change to open-source machine learning libraries soon!)
+- Powered by Gemini - (looking to go change to open-source machine learning libraries soon!)
 - Inspired by the need for accessible data science tools 
